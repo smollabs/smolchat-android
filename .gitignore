@@ -1,0 +1,11 @@
+# Build outputs
+/build/
+native/build/
+native/lib/
+*.apk
+*.aab
+*.idsig
+
+# Signing material
+*.keystore
+*.jks
