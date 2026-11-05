@@ -22,6 +22,7 @@ type DeviceInfo struct {
 	OS          string // e.g. "Android 15 (API 35)"
 	Model       string // device model, when known
 	Thermal     ThermalStatus
+	SystemDark  bool // the OS is in dark mode
 }
 
 // ThermalStatus mirrors Android's PowerManager.THERMAL_STATUS_* levels.
@@ -61,6 +62,7 @@ func DetectDevice(dir string) DeviceInfo {
 	d.DotProd = cpuHasDotProd()
 	d.OS, d.Model = osInfo()
 	d.Thermal = thermalStatus()
+	d.SystemDark = systemDark()
 	return d
 }
 
@@ -71,6 +73,7 @@ func (d *DeviceInfo) RefreshDynamic(dir string) {
 	}
 	d.FreeStorage = FreeSpace(dir)
 	d.Thermal = thermalStatus()
+	d.SystemDark = systemDark()
 }
 
 // FreeSpace returns bytes available to unprivileged users on dir's volume.

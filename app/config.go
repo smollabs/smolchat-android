@@ -63,16 +63,28 @@ type Settings struct {
 	Temperature   float32       `json:"temperature"`
 	SystemPrompt  string        `json:"system_prompt"`
 	Threads       int           `json:"threads"` // 0 = automatic
+
+	// Appearance.
+	Theme  string `json:"theme"`  // "system", "light" or "dark"
+	Accent string `json:"accent"` // blue, violet, green, orange, pink, graphite
+
+	// AutoPreference biases automatic selection: "speed", "balanced", "quality".
+	AutoPreference string `json:"auto_preference"`
+	// Thinking lets SmolLM3 reason step by step before answering.
+	Thinking bool `json:"thinking"`
 }
 
 // DefaultSettings returns conservative, phone-friendly defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		SelectionMode: SelectAuto,
-		ContextSize:   2048,
-		MaxTokens:     768,
-		Temperature:   0.6,
-		SystemPrompt:  "You are SmolChat, a helpful assistant running fully offline on the user's phone. Answer clearly and concisely.",
+		SelectionMode:  SelectAuto,
+		ContextSize:    2048,
+		MaxTokens:      1024,
+		Temperature:    0.7,
+		SystemPrompt:   "You are SmolChat, a helpful assistant running locally on the user's phone. Answer clearly and concisely.",
+		Theme:          "system",
+		Accent:         "violet",
+		AutoPreference: "balanced",
 	}
 }
 
@@ -92,6 +104,21 @@ func (s *Settings) normalize() {
 	}
 	if s.Threads < 0 || s.Threads > 16 {
 		s.Threads = 0
+	}
+	switch s.Theme {
+	case "system", "light", "dark":
+	default:
+		s.Theme = d.Theme
+	}
+	switch s.Accent {
+	case "blue", "violet", "green", "orange", "pink", "graphite":
+	default:
+		s.Accent = d.Accent
+	}
+	switch s.AutoPreference {
+	case "speed", "balanced", "quality":
+	default:
+		s.AutoPreference = d.AutoPreference
 	}
 }
 

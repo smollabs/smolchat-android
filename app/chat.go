@@ -206,6 +206,7 @@ func (a *App) pickModel(conv Conversation, query string, turns int) (ModelSpec, 
 		Device:      a.Device(),
 		ContextSize: a.Settings.Get().ContextSize,
 		LoadedID:    a.Runtime.Status().ModelID,
+		Preference:  a.Settings.Get().AutoPreference,
 	})
 	if err != nil {
 		return ModelSpec{}, "", err
@@ -259,8 +260,8 @@ func (a *App) generate() {
 
 func (a *App) runGeneration(ctx context.Context, spec ModelSpec, s Settings, prior []Message, replyID int64) error {
 	system := s.SystemPrompt
-	if spec.Family == "SmolLM3" {
-		system = strings.TrimSpace(system + "\n/no_think") // keep phone replies fast
+	if spec.Family == "SmolLM3" && !s.Thinking {
+		system = strings.TrimSpace(system + "\n/no_think") // fast answers unless thinking is on
 	}
 	cfg := ModelConfig{ID: spec.ID, Path: a.Models.WeightsPath(spec), ContextSize: s.ContextSize, Threads: s.Threads}
 	opts := GenerationOptions{

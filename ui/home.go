@@ -2,10 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"time"
 
 	"gioui.org/f32"
-	"image"
-	"time"
 
 	"gioui.org/font"
 	"gioui.org/io/event"
@@ -27,7 +28,17 @@ const (
 	screenChat screen = iota
 	screenLibrary
 	screenSettings
+	screenSelect // "Select text" view of one message
 )
+
+// leaving animates the page being popped off the stack.
+type leaving struct {
+	active bool
+	s      screen
+	anim   Anim    // 0 → 1
+	fromX  float32 // horizontal start (swipe-back), px
+	swipe  bool    // exits sideways (true) or downwards (false)
+}
 
 // UI is the root of the interface.
 type UI struct {
@@ -38,17 +49,29 @@ type UI struct {
 	showing bool // splash still visible
 
 	screen     screen
-	transition Anim // 0 → 1 as a new screen slides in
+	stack      []screen // previous pages, for Back
+	transition Anim     // 0 → 1 as a new screen slides in
+	leave      leaving
+	pageDrag   hdrag   // swipe right to go back
+	pageDX     float32 // current swipe offset, px
+	pageSpring Anim    // springs the page back when a swipe is abandoned
 	insets     layout.Inset
 
 	drawer   Drawer
 	chat     ChatScreen
 	lib      Library
 	settings SettingsScreen
+	sel      SelectView
+	msgMenu  MessageActions
 	dialog   Dialog
 	sheet    ModelSheet
 	actions  ConvActions
 	snack    Snackbar
+
+	// OnBarColor is called when the background colour changes, so the
+	// platform can recolour its status and navigation bars.
+	OnBarColor func(color.NRGBA)
+	barColor   color.NRGBA
 }
 
 // New creates the UI. The app core is attached later with SetApp so the
@@ -71,47 +94,108 @@ func (u *UI) report(err error) {
 	}
 }
 
+// navigate pushes page s (forward navigation).
 func (u *UI) navigate(s screen) {
 	if s == u.screen {
 		return
 	}
-	if u.screen == screenSettings {
+	if s == screenChat { // "go home": unwind the stack
+		u.resetToChat()
+		return
+	}
+	u.stack = append(u.stack, u.screen)
+	u.show(s)
+	u.transition.Set(0)
+	u.transition.Target = 1
+}
+
+func (u *UI) show(s screen) {
+	if u.screen == screenSettings && s != screenSettings {
 		u.settings.Leave(u.a)
 	}
 	u.screen = s
-	u.transition.Set(0)
-	u.transition.Target = 1
 	if s == screenLibrary {
 		u.a.RefreshDevice()
 		u.a.CheckOnline()
 	}
+	u.a.Invalidate() // navigation can happen after this frame's animations ran
+}
+
+// pop returns to the previous page; fromX > 0 continues a swipe-back.
+func (u *UI) pop(fromX float32) bool {
+	if len(u.stack) == 0 {
+		return false
+	}
+	prev := u.stack[len(u.stack)-1]
+	u.stack = u.stack[:len(u.stack)-1]
+	u.pageSpring.Set(0) // the revealed page sits still; only the old one moves
+	u.pageDX = 0
+	u.leave = leaving{active: true, s: u.screen, fromX: fromX, swipe: fromX > 0}
+	u.leave.anim.Rate = 16
+	u.leave.anim.Target = 1
+	u.show(prev)
+	u.transition.Set(1)
+	return true
+}
+
+func (u *UI) resetToChat() {
+	if u.screen == screenChat {
+		u.stack = nil
+		return
+	}
+	u.stack = []screen{screenChat}
+	u.pop(0)
 }
 
 func (u *UI) canGoBack() bool {
-	return u.dialog.open || u.sheet.open || u.actions.open || u.drawer.IsOpen() || u.screen != screenChat
+	return u.dialog.open || u.sheet.open || u.actions.open || u.msgMenu.open || u.drawer.IsOpen() || len(u.stack) > 0
 }
 
-// back handles the Android back button; it reports whether it consumed it.
+// back handles the Android back button / gesture; it reports whether it
+// consumed it. Order: overlays first, then the page stack.
 func (u *UI) back() bool {
 	switch {
 	case u.dialog.open:
 		u.dialog.Close()
+	case u.msgMenu.open:
+		u.msgMenu.open = false
 	case u.sheet.open:
 		u.sheet.open = false
 	case u.actions.open:
 		u.actions.open = false
 	case u.drawer.IsOpen():
 		u.drawer.Close()
-	case u.screen != screenChat:
-		u.navigate(screenChat)
 	default:
-		return false
+		return u.pop(0)
 	}
+	u.a.Invalidate()
 	return true
+}
+
+// applyTheme resolves the palette from settings (System follows the OS).
+func (u *UI) applyTheme() {
+	if u.a == nil {
+		return
+	}
+	st := u.a.Settings.Get()
+	if st.Theme == "system" {
+		u.a.RefreshSystemTheme()
+	}
+	dark := st.Theme == "dark" || (st.Theme == "system" && u.a.Device().SystemDark)
+	u.th.Apply(NewPalette(dark, st.Accent))
+	bar := u.th.Pal.Bg
+	if u.showing && !u.splash.Fading() {
+		bar = Background
+	}
+	if bar != u.barColor && u.OnBarColor != nil {
+		u.barColor = bar
+		u.OnBarColor(bar)
+	}
 }
 
 // Layout draws a frame. insets are the window's system insets in Dp.
 func (u *UI) Layout(gtx C, top, bottom unit.Dp) D {
+	u.applyTheme()
 	paint.Fill(gtx.Ops, u.th.Pal.Bg)
 	if u.a != nil && u.initErr == nil {
 		u.insets = layout.Inset{Top: top, Bottom: bottom}
@@ -133,38 +217,119 @@ func (u *UI) Layout(gtx C, top, bottom unit.Dp) D {
 		u.fatal(gtx)
 	}
 	if u.showing {
+		status := "Preparing your workspace…"
 		if u.a != nil || u.initErr != nil {
-			u.splash.Finish(gtx.Now)
+			u.splash.Finish()
+			status = "Ready"
 		}
-		u.showing = u.splash.Layout(gtx, u.th)
+		u.showing = u.splash.Layout(gtx, u.th, status)
 	}
 	return D{Size: gtx.Constraints.Max}
 }
 
+func (u *UI) layoutScreen(gtx C, s screen) {
+	switch s {
+	case screenLibrary:
+		u.lib.Layout(gtx, u)
+	case screenSettings:
+		u.settings.Layout(gtx, u)
+	case screenSelect:
+		u.sel.Layout(gtx, u)
+	default:
+		u.chat.Layout(gtx, u)
+	}
+}
+
 func (u *UI) main(gtx C) {
-	// Screens: the content sits above the keyboard/navigation inset.
+	full := gtx.Constraints.Max
+	cgtx := gtx
+	cgtx.Constraints.Max.Y -= gtx.Dp(u.insets.Bottom) // above keyboard / nav bar
+	cgtx.Constraints.Min = cgtx.Constraints.Max
+	Backdrop(gtx)
+	W := float32(full.X)
+
+	// Swipe right on a page to go back.
+	// Not on Select text: there horizontal drags select text.
+	canSwipe := u.screen != screenChat && u.screen != screenSelect && len(u.stack) > 0 && !u.leave.active
+	if canSwipe {
+		dragging, released := u.pageDrag.update(gtx)
+		switch {
+		case dragging:
+			u.pageDX = max(0, u.pageDrag.dx)
+			u.pageSpring.Set(u.pageDX)
+			gtx.Execute(op.InvalidateCmd{})
+		case released:
+			if u.pageDX > W*0.3 || u.pageDrag.lastDx > 4 {
+				u.pop(u.pageDX)
+			} else {
+				u.pageSpring.Target = 0
+				u.pageSpring.Rate = 16
+			}
+			u.pageDX = 0
+		}
+	}
+	offset := u.pageDX
+	if !u.pageDrag.active || u.pageDrag.locked != 1 {
+		offset = u.pageSpring.Step(gtx)
+	}
+
+	// The page underneath shows while swiping back.
+	if offset > 0 && len(u.stack) > 0 {
+		func() {
+			below := u.stack[len(u.stack)-1]
+			u.layoutScreen(cgtx.Disabled(), below)
+			a := 0.35 * (1 - offset/W)
+			paint.FillShape(gtx.Ops, withAlpha(rgb(0), uint8(255*a)), clip.Rect{Max: full}.Op())
+		}()
+	}
+
 	func() {
-		cgtx := gtx
-		cgtx.Constraints.Max.Y -= gtx.Dp(u.insets.Bottom)
-		cgtx.Constraints.Min = cgtx.Constraints.Max
+		if offset > 0 {
+			defer op.Offset(image.Pt(int(offset), 0)).Push(gtx.Ops).Pop()
+			if u.screen != screenChat {
+				Backdrop(gtx) // pages are opaque while moving
+			}
+		}
 		p := u.transition.Step(gtx)
-		if p < 1 {
-			dx := int(float32(gtx.Dp(28)) * (1 - float32(easeOut(float64(p)))))
-			defer op.Offset(image.Pt(dx, 0)).Push(gtx.Ops).Pop()
-			defer paint.PushOpacity(gtx.Ops, 0.25+0.75*p).Pop()
+		if p < 1 { // pages rise from below
+			dy := int(float32(gtx.Dp(36)) * (1 - float32(easeOut(float64(p)))))
+			defer op.Offset(image.Pt(0, dy)).Push(gtx.Ops).Pop()
+			defer paint.PushOpacity(gtx.Ops, 0.2+0.8*p).Pop()
 		}
-		switch u.screen {
-		case screenLibrary:
-			u.lib.Layout(cgtx, u)
-		case screenSettings:
-			u.settings.Layout(cgtx, u)
-		default:
-			u.chat.Layout(cgtx, u)
-		}
+		u.layoutScreen(cgtx, u.screen)
 	}()
+	if canSwipe {
+		top := gtx.Dp(u.insets.Top + 60) // leave the header (close button) alone
+		u.pageDrag.rightOnly = true
+		u.pageDrag.add(gtx, image.Rect(0, top, full.X, cgtx.Constraints.Max.Y))
+	}
+
+	// The popped page animates away on top.
+	if u.leave.active {
+		p := u.leave.anim.Step(gtx)
+		if p >= 1 {
+			u.leave.active = false
+		} else {
+			func() {
+				if u.leave.swipe {
+					x := u.leave.fromX + (W-u.leave.fromX)*float32(easeOut(float64(p)))
+					defer op.Offset(image.Pt(int(x), 0)).Push(gtx.Ops).Pop()
+					Backdrop(gtx)
+				} else {
+					dy := int(float32(gtx.Dp(48)) * float32(easeOut(float64(p))))
+					defer op.Offset(image.Pt(0, dy)).Push(gtx.Ops).Pop()
+					defer paint.PushOpacity(gtx.Ops, 1-p).Pop()
+					Backdrop(gtx)
+				}
+				u.layoutScreen(cgtx.Disabled(), u.leave.s)
+			}()
+		}
+	}
+
 	u.drawer.Layout(gtx, u)
 	u.sheet.Layout(gtx, u)
 	u.actions.Layout(gtx, u)
+	u.msgMenu.Layout(gtx, u)
 	u.dialog.Layout(gtx, u)
 	u.snack.Layout(gtx, u)
 }
@@ -174,7 +339,7 @@ func (u *UI) fatal(gtx C) {
 	layout.Center.Layout(gtx, func(gtx C) D {
 		return layout.UniformInset(24).Layout(gtx, func(gtx C) D {
 			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return Logo(gtx, 52, false) }),
+				layout.Rigid(func(gtx C) D { return LogoTile(gtx, 56) }),
 				layout.Rigid(Gap(18)),
 				layout.Rigid(Lbl(th, 18, th.Pal.Text, font.SemiBold, "SmolChat couldn't start").Layout),
 				layout.Rigid(Gap(8)),
@@ -254,7 +419,9 @@ func (b *BottomSheet) layout(gtx C, u *UI, content layout.Widget) {
 	defer op.Offset(image.Pt(x, y)).Push(gtx.Ops).Pop()
 	r := gtx.Dp(22)
 	sz := image.Pt(maxW, d.Size.Y+r)
-	paint.FillShape(gtx.Ops, u.th.Pal.Surface, clip.RRect{Rect: image.Rectangle{Max: sz}, NW: r, NE: r}.Op(gtx.Ops))
+	sheet := clip.RRect{Rect: image.Rectangle{Max: sz}, NW: r, NE: r}
+	paint.FillShape(gtx.Ops, u.th.Pal.Popup, sheet.Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, u.th.Pal.BorderStrong, clip.Stroke{Path: sheet.Path(gtx.Ops), Width: float32(gtx.Dp(1))}.Op())
 	blockInput(gtx, sz, b)
 	call.Add(gtx.Ops)
 }
@@ -367,7 +534,7 @@ func (s *ModelSheet) Layout(gtx C, u *UI) {
 				})
 			},
 			func(gtx C) D {
-				return sheetRow(gtx, th, &s.auto, ic.Bolt, "Auto",
+				return sheetRow(gtx, th, &s.auto, ic.Auto, "Auto",
 					"Picks the best downloaded model for each message", conv.SelectionMode != app.SelectManual, false)
 			},
 		}
@@ -517,7 +684,7 @@ func (d *Dialog) Layout(gtx C, u *UI) {
 	cgtx := gtx
 	w := min(full.X-gtx.Dp(48), gtx.Dp(400))
 	cgtx.Constraints = layout.Constraints{Min: image.Pt(w, 0), Max: image.Pt(w, full.Y)}
-	dims := Surface{Bg: th.Pal.Surface2, Border: th.Pal.BorderStrong, Radius: 22}.Layout(cgtx, func(gtx C) D {
+	dims := Surface{Bg: th.Pal.Popup, Border: th.Pal.BorderStrong, Radius: 22}.Layout(cgtx, func(gtx C) D {
 		blockInput(gtx, gtx.Constraints.Min, d)
 		return layout.UniformInset(22).Layout(gtx, func(gtx C) D {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -592,7 +759,7 @@ func (s *Snackbar) Layout(gtx C, u *UI) {
 	cgtx := gtx
 	w := min(full.X-gtx.Dp(32), gtx.Dp(520))
 	cgtx.Constraints = layout.Constraints{Min: image.Pt(w, 0), Max: image.Pt(w, full.Y)}
-	dims := Surface{Bg: th.Pal.Elevated, Border: th.Pal.BorderStrong, Radius: 14}.Layout(cgtx, func(gtx C) D {
+	dims := Surface{Bg: th.Pal.Popup, Border: th.Pal.BorderStrong, Radius: 14}.Layout(cgtx, func(gtx C) D {
 		return layout.Inset{Left: 16, Right: 16, Top: 12, Bottom: 12}.Layout(gtx, func(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx C) D {

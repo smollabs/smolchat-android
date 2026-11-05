@@ -7,12 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
@@ -25,31 +27,40 @@ type msgState struct {
 	md       Markdown
 	copy     widget.Clickable
 	copiedAt time.Time
+	lp       longPress // opens the message menu
+}
+
+// quick-action chips (from the Mac app): they prefill the composer.
+var quickActions = []struct {
+	label, prompt string
+	icon          func() *widget.Icon
+}{
+	{"Explain", "Explain in simple terms: ", func() *widget.Icon { return ic.Lightbulb }},
+	{"Brainstorm", "Brainstorm ideas for ", func() *widget.Icon { return ic.Compass }},
+	{"Write", "Help me write ", func() *widget.Icon { return ic.Edit }},
+	{"Code", "Write code that ", func() *widget.Icon { return ic.Code }},
 }
 
 // ChatScreen is the conversation view with its composer.
 type ChatScreen struct {
-	menu, newChat, title widget.Clickable
-	list                 widget.List
-	editor               widget.Editor
-	send                 widget.Clickable
-	regen                widget.Clickable
-	toBottom             widget.Clickable
-	modelChip            widget.Clickable
-	getStarted           widget.Clickable
-	browse               widget.Clickable
-	suggest              [4]widget.Clickable
-	msgs                 map[int64]*msgState
-	convID               string
-	focusComposer        bool
-	lastCount            int
-}
-
-var suggestions = [4][2]string{
-	{"Explain something", "Explain how black holes form, simply"},
-	{"Write", "Write a short poem about the monsoon"},
-	{"Plan", "Help me plan a relaxing weekend at home"},
-	{"Code", "Write a Python function that checks if a word is a palindrome"},
+	menu, newChat, modelPill widget.Clickable
+	list                     widget.List
+	chipList                 layout.List
+	editor                   widget.Editor
+	send                     widget.Clickable
+	regen                    widget.Clickable
+	toBottom                 widget.Clickable
+	getStarted               widget.Clickable
+	browse                   widget.Clickable
+	chips                    [4]widget.Clickable
+	msgs                     map[int64]*msgState
+	convID                   string
+	focusComposer            bool
+	lastCount                int
+	welcomeIn                Anim
+	started                  bool
+	composerLP               longPress // opens the paste/copy bar
+	edit                     editBar
 }
 
 func (c *ChatScreen) state(id int64) *msgState {
@@ -64,19 +75,41 @@ func (c *ChatScreen) state(id int64) *msgState {
 	return s
 }
 
+// usePrompt prefills the composer (quick-action chips).
+func (c *ChatScreen) usePrompt(p string) {
+	c.editor.SetText(p)
+	c.editor.SetCaret(c.editor.Len(), c.editor.Len())
+	c.focusComposer = true
+}
+
+func greeting(now time.Time) string {
+	switch h := now.Hour(); {
+	case h < 5:
+		return "Burning the midnight oil?"
+	case h < 12:
+		return "Good morning."
+	case h < 18:
+		return "Good afternoon."
+	}
+	return "Good evening."
+}
+
 func (c *ChatScreen) Layout(gtx C, u *UI) D {
 	a := u.a
 	view := a.Chat()
-	if view.Conv.ID != c.convID { // switched conversations: drop cached widgets
+	if view.Conv.ID != c.convID || !c.started { // switched conversations: drop cached widgets
+		c.started = true
 		c.convID = view.Conv.ID
 		c.msgs = nil
-		c.list.Position = layout.Position{BeforeEnd: false}
+		c.list.Position = layout.Position{}
 		c.list.ScrollToEnd = true
 		c.lastCount = 0
+		c.welcomeIn.Set(0)
+		c.welcomeIn.Target = 1
+		c.welcomeIn.Rate = 7
 	}
 	installed := a.Models.Installed()
 
-	// Header actions.
 	if c.menu.Clicked(gtx) {
 		u.drawer.Open()
 	}
@@ -84,7 +117,7 @@ func (c *ChatScreen) Layout(gtx C, u *UI) D {
 		a.NewChat()
 		c.focusComposer = true
 	}
-	if c.title.Clicked(gtx) || c.modelChip.Clicked(gtx) {
+	if c.modelPill.Clicked(gtx) {
 		u.sheet.Show()
 	}
 	if c.getStarted.Clicked(gtx) {
@@ -95,9 +128,9 @@ func (c *ChatScreen) Layout(gtx C, u *UI) D {
 	if c.browse.Clicked(gtx) {
 		u.navigate(screenLibrary)
 	}
-	for i := range c.suggest {
-		if c.suggest[i].Clicked(gtx) {
-			c.submit(u, suggestions[i][1], installed)
+	for i := range c.chips {
+		if c.chips[i].Clicked(gtx) {
+			c.usePrompt(quickActions[i].prompt)
 		}
 	}
 	if c.regen.Clicked(gtx) {
@@ -107,8 +140,6 @@ func (c *ChatScreen) Layout(gtx C, u *UI) D {
 		c.list.ScrollTo(len(view.Messages))
 		c.list.ScrollToEnd = true
 	}
-
-	// Composer events.
 	for {
 		ev, ok := c.editor.Update(gtx)
 		if !ok {
@@ -130,21 +161,42 @@ func (c *ChatScreen) Layout(gtx C, u *UI) D {
 		gtx.Execute(key.FocusCmd{Tag: &c.editor})
 	}
 
+	empty := len(view.Messages) == 0
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D { return c.header(gtx, u, view) }),
 		layout.Flexed(1, func(gtx C) D {
-			if len(view.Messages) == 0 {
+			if empty {
 				return c.welcome(gtx, u, installed)
 			}
 			return c.messages(gtx, u, view)
 		}),
+		layout.Rigid(func(gtx C) D {
+			if c.edit.open {
+				return c.edit.Layout(gtx, u.th, &c.editor)
+			}
+			if !empty || len(installed) == 0 {
+				return D{}
+			}
+			return c.chipRow(gtx, u.th)
+		}),
 		layout.Rigid(func(gtx C) D { return c.composer(gtx, u, view, installed) }),
+		layout.Rigid(func(gtx C) D {
+			if empty {
+				return layout.Spacer{Height: 10}.Layout(gtx)
+			}
+			return layout.Inset{Left: 16, Right: 16, Bottom: 8}.Layout(gtx, func(gtx C) D {
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				l := Lbl(u.th, 11, u.th.Pal.TextFaint, font.Normal, "SmolChat runs entirely on this phone. Small models can make mistakes — check important information.")
+				l.Alignment = text.Middle
+				return l.Layout(gtx)
+			})
+		}),
 	)
 }
 
-func (c *ChatScreen) submit(u *UI, text string, installed []app.ModelSpec) {
-	text = strings.TrimSpace(text)
-	if text == "" {
+func (c *ChatScreen) submit(u *UI, txt string, installed []app.ModelSpec) {
+	txt = strings.TrimSpace(txt)
+	if txt == "" {
 		return
 	}
 	if len(installed) == 0 {
@@ -155,60 +207,67 @@ func (c *ChatScreen) submit(u *UI, text string, installed []app.ModelSpec) {
 	c.editor.SetText("")
 	c.list.ScrollToEnd = true
 	c.list.Position.BeforeEnd = false
-	u.a.Send(text)
+	u.a.Send(txt)
 }
 
-// modelLabel describes the current selection, e.g. "Auto · SmolLM2 360M".
-func modelLabel(a *app.App, conv app.Conversation) (mode, model string) {
+// modelLabel is the pill text: "Auto", or the manually chosen model.
+func modelLabel(conv app.Conversation) string {
 	if conv.SelectionMode == app.SelectManual {
 		if spec, ok := app.FindSpec(conv.ModelID); ok {
-			return "Manual", spec.Name
+			return spec.Name
 		}
-		return "Manual", "No model"
 	}
-	st := a.Runtime.Status()
-	if spec, ok := app.FindSpec(st.ModelID); ok && st.Phase != app.PhaseIdle {
-		return "Auto", spec.Name
-	}
-	if spec, ok := app.FindSpec(conv.ModelID); ok && a.Models.IsInstalled(spec.ID) {
-		return "Auto", spec.Name
-	}
-	return "Auto", "Best model per message"
+	return "Auto"
+}
+
+// glassPill draws the Mac's glass pill (fill and hairline edge).
+func glassPill(gtx C, th *Theme, clk *widget.Clickable, w layout.Widget) D {
+	return clk.Layout(gtx, func(gtx C) D {
+		return layout.Background{}.Layout(gtx,
+			func(gtx C) D {
+				sz := gtx.Constraints.Min
+				r := sz.Y / 2
+				fillRRect(gtx, sz, r, withAlpha(th.Pal.Glass, 0xe6))
+				strokeRRect(gtx, sz, r, float32(gtx.Dp(1)), th.Pal.BorderStrong)
+				pressOverlay(gtx, clk, sz, r)
+				return D{Size: sz}
+			}, w)
+	})
 }
 
 func (c *ChatScreen) header(gtx C, u *UI, view app.ChatView) D {
 	th := u.th
-	mode, model := modelLabel(u.a, view.Conv)
+	label := modelLabel(view.Conv)
 	return layout.Inset{Top: u.insets.Top}.Layout(gtx, func(gtx C) D {
-		return layout.Inset{Left: 4, Right: 4, Top: 4, Bottom: 4}.Layout(gtx, func(gtx C) D {
+		return layout.Inset{Left: 4, Right: 4, Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return IconButton(gtx, &c.menu, ic.Menu, th.Pal.Text) }),
-				layout.Flexed(1, func(gtx C) D {
-					return layout.Center.Layout(gtx, func(gtx C) D {
-						return c.title.Layout(gtx, func(gtx C) D {
-							return layout.Inset{Left: 10, Right: 6, Top: 4, Bottom: 4}.Layout(gtx, func(gtx C) D {
-								return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-									layout.Rigid(func(gtx C) D {
-										return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-											layout.Rigid(Lbl(th, 17, th.Pal.Text, font.SemiBold, "SmolChat").Layout),
-											layout.Rigid(func(gtx C) D {
-												s := gtx.Dp(20)
-												gtx.Constraints = layout.Exact(image.Pt(s, s))
-												return ic.ChevronDown.Layout(gtx, th.Pal.TextMuted)
-											}),
-										)
-									}),
-									layout.Rigid(func(gtx C) D {
-										l := Lbl(th, 12, th.Pal.TextMuted, font.Medium, mode+" · "+model)
-										l.MaxLines = 1
-										return l.Layout(gtx)
-									}),
-								)
-							})
+				layout.Rigid(func(gtx C) D { return IconButton(gtx, &c.menu, ic.Menu, th.Pal.TextMuted) }),
+				layout.Rigid(Gap(4)),
+				layout.Rigid(func(gtx C) D {
+					return glassPill(gtx, th, &c.modelPill, func(gtx C) D {
+						return layout.Inset{Left: 12, Right: 10, Top: 8, Bottom: 8}.Layout(gtx, func(gtx C) D {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx C) D { return SparkleIcon(gtx, 15, th.Pal.TextMuted) }),
+								layout.Rigid(Gap(7)),
+								layout.Rigid(func(gtx C) D {
+									gtx.Constraints.Max.X = gtx.Dp(180)
+									l := Lbl(th, 14, th.Pal.Text, font.Medium, label)
+									l.MaxLines = 1
+									l.Truncator = "…"
+									return l.Layout(gtx)
+								}),
+								layout.Rigid(Gap(4)),
+								layout.Rigid(func(gtx C) D {
+									s := gtx.Dp(18)
+									gtx.Constraints = layout.Exact(image.Pt(s, s))
+									return ic.ChevronDown.Layout(gtx, th.Pal.TextFaint)
+								}),
+							)
 						})
 					})
 				}),
-				layout.Rigid(func(gtx C) D { return IconButton(gtx, &c.newChat, ic.NewChat, th.Pal.Text) }),
+				layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 0)} }),
+				layout.Rigid(func(gtx C) D { return IconButton(gtx, &c.newChat, ic.NewChat, th.Pal.TextMuted) }),
 			)
 		})
 	})
@@ -216,31 +275,38 @@ func (c *ChatScreen) header(gtx C, u *UI, view app.ChatView) D {
 
 func (c *ChatScreen) welcome(gtx C, u *UI, installed []app.ModelSpec) D {
 	th := u.th
+	in := c.welcomeIn.Step(gtx)
 	return layout.Center.Layout(gtx, func(gtx C) D {
 		return layout.Inset{Left: 20, Right: 20}.Layout(gtx, func(gtx C) D {
 			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(460))
+			defer paint.PushOpacity(gtx.Ops, in).Pop()
+			defer op.Offset(image.Pt(0, int(float32(gtx.Dp(14))*(1-in)))).Push(gtx.Ops).Pop()
+			mw := unit.Dp(min(300, float32(gtx.Constraints.Max.X)/gtx.Metric.PxPerDp-20))
+			reserve := float32(110) // greeting + title
+			if len(installed) == 0 {
+				mw = min(mw, 200) // leave room for the download card
+				reserve += 250
+			}
+			// Shrink the mascot when the keyboard leaves little room; hide it
+			// when it would be too small to read.
+			availH := float32(gtx.Constraints.Max.Y)/gtx.Metric.PxPerDp - reserve
+			mw = min(mw, unit.Dp(availH*720/479))
+			showMascot := mw >= 90
 			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return Logo(gtx, 52, false) }),
-				layout.Rigid(Gap(18)),
-				layout.Rigid(centered(Lbl(th, 23, th.Pal.Text, font.SemiBold, "What can I help with?")).Layout),
-				layout.Rigid(Gap(6)),
 				layout.Rigid(func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D {
-							s := gtx.Dp(13)
-							gtx.Constraints = layout.Exact(image.Pt(s, s))
-							return ic.Lock.Layout(gtx, th.Pal.TextFaint)
-						}),
-						layout.Rigid(Gap(5)),
-						layout.Rigid(Lbl(th, 13, th.Pal.TextFaint, font.Normal, "Private and offline — runs entirely on this phone").Layout),
-					)
-				}),
-				layout.Rigid(Gap(28)),
-				layout.Rigid(func(gtx C) D {
-					if len(installed) == 0 {
-						return c.firstRun(gtx, u)
+					if !showMascot {
+						return D{}
 					}
-					return c.suggestionGrid(gtx, th)
+					return layout.Inset{Bottom: 14}.Layout(gtx, func(gtx C) D { return Mascot(gtx, mw) })
+				}),
+				layout.Rigid(centered(Lbl(th, 14.5, th.Pal.TextMuted, font.Normal, greeting(time.Now()))).Layout),
+				layout.Rigid(Gap(4)),
+				layout.Rigid(centered(Lbl(th, 25, th.Pal.Text, font.SemiBold, "What shall we explore today?")).Layout),
+				layout.Rigid(func(gtx C) D {
+					if len(installed) > 0 {
+						return D{}
+					}
+					return layout.Inset{Top: 22}.Layout(gtx, func(gtx C) D { return c.firstRun(gtx, u) })
 				}),
 			)
 		})
@@ -249,103 +315,79 @@ func (c *ChatScreen) welcome(gtx C, u *UI, installed []app.ModelSpec) D {
 
 func (c *ChatScreen) firstRun(gtx C, u *UI) D {
 	th, a := u.th, u.a
-	d := a.Device()
-	rec := app.Recommend(d, a.Settings.Get().ContextSize)
+	rec := app.Recommend(a.Device(), a.Settings.Get().ContextSize)
 	pr := a.Downloads.Progress(rec)
-	return Surface{Bg: th.Pal.Surface, Border: th.Pal.Border, Radius: 20}.Layout(gtx, func(gtx C) D {
-		gtx.Constraints.Min.X = gtx.Constraints.Max.X
-		return layout.UniformInset(20).Layout(gtx, func(gtx C) D {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(Lbl(th, 16.5, th.Pal.Text, font.SemiBold, "Download your first model").Layout),
-				layout.Rigid(Gap(6)),
-				layout.Rigid(Lbl(th, 14, th.Pal.TextMuted, font.Normal,
-					"SmolChat ships without model weights. Download one once, then chat anywhere — no internet needed.").Layout),
-				layout.Rigid(Gap(16)),
-				layout.Rigid(func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return familyBadge(gtx, th, rec) }),
-						layout.Rigid(Gap(12)),
-						layout.Flexed(1, func(gtx C) D {
-							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-								layout.Rigid(Lbl(th, 14.5, th.Pal.Text, font.SemiBold, rec.Name).Layout),
-								layout.Rigid(Lbl(th, 12.5, th.Pal.TextMuted, font.Normal,
-									fmt.Sprintf("Recommended for this phone · %s", app.HumanBytes(rec.DownloadSize()))).Layout),
-							)
+	return GlassCard(gtx, th, func(gtx C) D {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(Lbl(th, 16, th.Pal.Text, font.SemiBold, "Download your first model").Layout),
+			layout.Rigid(Gap(5)),
+			layout.Rigid(func(gtx C) D {
+				return hint(gtx, th, fmt.Sprintf("%s is recommended for this phone. Download once, then chat anywhere — no internet needed.", rec.Name))
+			}),
+			layout.Rigid(Gap(14)),
+			layout.Rigid(func(gtx C) D {
+				switch {
+				case pr.Active():
+					return downloadProgress(gtx, th, pr)
+				case pr.Status == app.DLPaused:
+					return Button{Kind: BtnPrimary, Icon: ic.Play, Wide: true,
+						Text: fmt.Sprintf("Resume · %s of %s", app.HumanBytes(pr.Downloaded), app.HumanBytes(pr.Total))}.Layout(gtx, th, &c.getStarted)
+				case pr.Status == app.DLFailed:
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(Lbl(th, 12.5, th.Pal.Danger, font.Medium, pr.Err).Layout),
+						layout.Rigid(Gap(10)),
+						layout.Rigid(func(gtx C) D {
+							return Button{Kind: BtnPrimary, Text: "Try again", Icon: ic.Refresh, Wide: true}.Layout(gtx, th, &c.getStarted)
 						}),
 					)
-				}),
-				layout.Rigid(Gap(16)),
-				layout.Rigid(func(gtx C) D {
-					switch {
-					case pr.Active():
-						return downloadProgress(gtx, th, pr)
-					case pr.Status == app.DLPaused:
-						return Button{Kind: BtnPrimary, Icon: ic.Play, Wide: true,
-							Text: fmt.Sprintf("Resume · %s of %s", app.HumanBytes(pr.Downloaded), app.HumanBytes(pr.Total))}.Layout(gtx, th, &c.getStarted)
-					case pr.Status == app.DLFailed:
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(Lbl(th, 12.5, th.Pal.Danger, font.Medium, pr.Err).Layout),
-							layout.Rigid(Gap(10)),
-							layout.Rigid(func(gtx C) D {
-								return Button{Kind: BtnPrimary, Text: "Try again", Icon: ic.Refresh, Wide: true}.Layout(gtx, th, &c.getStarted)
-							}),
-						)
-					}
-					return Button{Kind: BtnPrimary, Text: "Download " + app.HumanBytes(rec.DownloadSize()), Icon: ic.Download, Wide: true}.Layout(gtx, th, &c.getStarted)
-				}),
-				layout.Rigid(Gap(8)),
-				layout.Rigid(func(gtx C) D {
-					return Button{Kind: BtnGhost, Text: "Browse all models", Wide: true}.Layout(gtx, th, &c.browse)
-				}),
-			)
-		})
+				}
+				return Button{Kind: BtnPrimary, Text: "Download · " + app.HumanBytes(rec.DownloadSize()), Icon: ic.Download, Wide: true}.Layout(gtx, th, &c.getStarted)
+			}),
+			layout.Rigid(Gap(6)),
+			layout.Rigid(func(gtx C) D {
+				return Button{Kind: BtnGhost, Text: "Browse the Model Library", Wide: true, Small: true}.Layout(gtx, th, &c.browse)
+			}),
+		)
 	})
 }
 
-func (c *ChatScreen) suggestionGrid(gtx C, th *Theme) D {
-	cell := func(i int) layout.FlexChild {
-		return layout.Flexed(1, func(gtx C) D {
-			clk := &c.suggest[i]
-			return clk.Layout(gtx, func(gtx C) D {
-				return Surface{Bg: th.Pal.Surface, Border: th.Pal.Border, Radius: 16}.Layout(gtx, func(gtx C) D {
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					gtx.Constraints.Min.Y = gtx.Dp(76)
-					return layout.Stack{}.Layout(gtx,
-						layout.Stacked(func(gtx C) D {
-							return layout.UniformInset(14).Layout(gtx, func(gtx C) D {
-								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-									layout.Rigid(Lbl(th, 13.5, th.Pal.Text, font.SemiBold, suggestions[i][0]).Layout),
-									layout.Rigid(Gap(3)),
-									layout.Rigid(func(gtx C) D {
-										l := Lbl(th, 12.5, th.Pal.TextMuted, font.Normal, suggestions[i][1])
-										l.MaxLines = 2
-										l.Truncator = "…"
-										return l.Layout(gtx)
-									}),
-								)
-							})
-						}),
-						layout.Expanded(func(gtx C) D {
-							pressOverlay(gtx, clk, gtx.Constraints.Min, gtx.Dp(16))
-							return D{Size: gtx.Constraints.Min}
-						}),
-					)
+// chipRow shows the quick-action pills above the composer.
+func (c *ChatScreen) chipRow(gtx C, th *Theme) D {
+	return layout.Inset{Bottom: 10}.Layout(gtx, func(gtx C) D {
+		return layout.Center.Layout(gtx, func(gtx C) D {
+			c.chipList.Axis = layout.Horizontal
+			return c.chipList.Layout(gtx, len(quickActions), func(gtx C, i int) D {
+				left, right := unit.Dp(3), unit.Dp(3)
+				if i == 0 {
+					left = 12
+				}
+				if i == len(quickActions)-1 {
+					right = 12
+				}
+				return layout.Inset{Left: left, Right: right}.Layout(gtx, func(gtx C) D {
+					return glassPill(gtx, th, &c.chips[i], func(gtx C) D {
+						return layout.Inset{Left: 11, Right: 9, Top: 7, Bottom: 7}.Layout(gtx, func(gtx C) D {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(Lbl(th, 13, th.Pal.Text, font.Medium, quickActions[i].label).Layout),
+								layout.Rigid(Gap(4)),
+								layout.Rigid(func(gtx C) D {
+									s := gtx.Dp(13)
+									gtx.Constraints = layout.Exact(image.Pt(s, s))
+									return quickActions[i].icon().Layout(gtx, th.Pal.TextFaint)
+								}),
+							)
+						})
+					})
 				})
 			})
 		})
-	}
-	row := func(i int) layout.FlexChild {
-		return layout.Rigid(func(gtx C) D {
-			return layout.Flex{}.Layout(gtx, cell(i), layout.Rigid(Gap(10)), cell(i+1))
-		})
-	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(0), layout.Rigid(Gap(10)), row(2))
+	})
 }
 
 func (c *ChatScreen) messages(gtx C, u *UI, view app.ChatView) D {
 	th := u.th
 	if n := len(view.Messages); n != c.lastCount {
-		if n > c.lastCount { // a new message: follow it
+		if n > c.lastCount {
 			c.list.ScrollToEnd = true
 		}
 		c.lastCount = n
@@ -356,16 +398,26 @@ func (c *ChatScreen) messages(gtx C, u *UI, view app.ChatView) D {
 		layout.Expanded(func(gtx C) D {
 			return material.List(th.Theme, &c.list).Layout(gtx, len(view.Messages)+1, func(gtx C, i int) D {
 				if i == len(view.Messages) {
-					return D{Size: image.Pt(0, gtx.Dp(12))}
+					return D{Size: image.Pt(0, gtx.Dp(8))}
 				}
 				m := view.Messages[i]
 				last := i == len(view.Messages)-1
-				return layout.Inset{Left: 16, Right: 16, Top: 10, Bottom: 6}.Layout(gtx, func(gtx C) D {
+				top := unit.Dp(10)
+				if m.Role == "assistant" {
+					top = 18
+				}
+				st := c.state(m.ID)
+				if st.lp.Update(gtx) && !(last && view.Streaming) {
+					u.msgMenu.Show(m, last)
+				}
+				return layout.Inset{Left: 16, Right: 16, Top: top, Bottom: 4}.Layout(gtx, func(gtx C) D {
 					gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(760))
-					if m.Role == "user" {
-						return c.userBubble(gtx, th, m)
-					}
-					return c.assistant(gtx, u, view, m, last)
+					return withLongPress(gtx, &st.lp, func(gtx C) D {
+						if m.Role == "user" {
+							return c.userBubble(gtx, th, m)
+						}
+						return c.assistant(gtx, u, view, m, last)
+					})
 				})
 			})
 		}),
@@ -373,14 +425,12 @@ func (c *ChatScreen) messages(gtx C, u *UI, view app.ChatView) D {
 			if !c.list.Position.BeforeEnd {
 				return D{}
 			}
-			return layout.Inset{Bottom: 10}.Layout(gtx, func(gtx C) D {
-				return c.toBottom.Layout(gtx, func(gtx C) D {
-					return Surface{Bg: th.Pal.Elevated, Border: th.Pal.BorderStrong, Radius: 18}.Layout(gtx, func(gtx C) D {
-						return layout.UniformInset(7).Layout(gtx, func(gtx C) D {
-							s := gtx.Dp(22)
-							gtx.Constraints = layout.Exact(image.Pt(s, s))
-							return ic.ChevronDown.Layout(gtx, th.Pal.Text)
-						})
+			return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx C) D {
+				return glassPill(gtx, th, &c.toBottom, func(gtx C) D {
+					return layout.UniformInset(7).Layout(gtx, func(gtx C) D {
+						s := gtx.Dp(20)
+						gtx.Constraints = layout.Exact(image.Pt(s, s))
+						return ic.ChevronDown.Layout(gtx, th.Pal.TextMuted)
 					})
 				})
 			})
@@ -391,9 +441,9 @@ func (c *ChatScreen) messages(gtx C, u *UI, view app.ChatView) D {
 func (c *ChatScreen) userBubble(gtx C, th *Theme, m app.Message) D {
 	gtx.Constraints.Min.X = gtx.Constraints.Max.X // list items start at 0: give E room to align
 	return layout.E.Layout(gtx, func(gtx C) D {
-		gtx.Constraints.Max.X = gtx.Constraints.Max.X * 82 / 100
-		return Surface{Bg: th.Pal.UserBubble, Radius: 20}.Layout(gtx, func(gtx C) D {
-			return layout.Inset{Left: 15, Right: 15, Top: 10, Bottom: 10}.Layout(gtx, func(gtx C) D {
+		gtx.Constraints.Max.X = gtx.Constraints.Max.X * 84 / 100
+		return Surface{Bg: th.Pal.UserBubble, Border: th.Pal.Border, Radius: 20}.Layout(gtx, func(gtx C) D {
+			return layout.Inset{Left: 16, Right: 16, Top: 10, Bottom: 10}.Layout(gtx, func(gtx C) D {
 				l := Lbl(th, bodySize, th.Pal.Text, font.Normal, m.Content)
 				l.LineHeightScale = 1.38
 				return l.Layout(gtx)
@@ -411,16 +461,35 @@ func (c *ChatScreen) assistant(gtx C, u *UI, view app.ChatView, m app.Message, l
 		st.copiedAt = gtx.Now
 		a.Notify("Copied to clipboard", false)
 	}
+	name := "SmolChat"
+	if spec, ok := app.FindSpec(m.ModelID); ok {
+		name = spec.Name
+	}
 
-	var children []layout.FlexChild
+	children := []layout.FlexChild{
+		layout.Rigid(func(gtx C) D { // avatar + model name
+			return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return LogoTile(gtx, 24) }),
+					layout.Rigid(Gap(10)),
+					layout.Rigid(Lbl(th, 14, th.Pal.Text, font.SemiBold, name).Layout),
+				)
+			})
+		}),
+	}
 	switch {
 	case m.StopReason == "error":
 		children = append(children, layout.Rigid(func(gtx C) D { return c.errorCard(gtx, u, m) }))
 	case strings.TrimSpace(m.Content) == "" && streaming:
-		children = append(children, layout.Rigid(func(gtx C) D { return c.pending(gtx, u, view) }))
+		children = append(children, layout.Rigid(func(gtx C) D { return c.pending(gtx, u) }))
+	case strings.TrimSpace(m.Content) == "":
+		children = append(children, layout.Rigid(Lbl(th, 14, th.Pal.TextFaint, font.Normal, "Stopped before replying.").Layout))
 	default:
 		st.md.Set(th, m.Content)
 		children = append(children, layout.Rigid(func(gtx C) D { return st.md.Layout(gtx, th) }))
+	}
+	if streaming && strings.TrimSpace(m.Content) != "" {
+		children = append(children, layout.Rigid(func(gtx C) D { return c.liveStats(gtx, th, view) }))
 	}
 	if !streaming && m.StopReason != "error" {
 		children = append(children, layout.Rigid(func(gtx C) D { return c.actionRow(gtx, u, m, st, last) }))
@@ -428,11 +497,25 @@ func (c *ChatScreen) assistant(gtx C, u *UI, view app.ChatView, m app.Message, l
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
+func (c *ChatScreen) liveStats(gtx C, th *Theme, view app.ChatView) D {
+	if view.StreamTokens < 2 {
+		return D{}
+	}
+	tps := float64(view.StreamTokens) / max(0.001, time.Since(view.StreamStart).Seconds())
+	return layout.Inset{Top: 8}.Layout(gtx, func(gtx C) D {
+		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return TypingDots(gtx, th.Pal.Accent) }),
+			layout.Rigid(Gap(10)),
+			layout.Rigid(Lbl(th, 12, th.Pal.TextFaint, font.Medium, fmt.Sprintf("%.0f tok/s", tps)).Layout),
+		)
+	})
+}
+
 // pending shows model loading or the typing indicator before the first token.
-func (c *ChatScreen) pending(gtx C, u *UI, view app.ChatView) D {
+func (c *ChatScreen) pending(gtx C, u *UI) D {
 	th := u.th
 	st := u.a.Runtime.Status()
-	return layout.Inset{Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
+	return layout.Inset{Top: 4, Bottom: 6}.Layout(gtx, func(gtx C) D {
 		if st.Phase == app.PhaseLoading {
 			spec, _ := app.FindSpec(st.ModelID)
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -445,13 +528,13 @@ func (c *ChatScreen) pending(gtx C, u *UI, view app.ChatView) D {
 				}),
 			)
 		}
-		return TypingDots(gtx, th.Pal.TextMuted)
+		return TypingDots(gtx, th.Pal.Accent)
 	})
 }
 
 func (c *ChatScreen) errorCard(gtx C, u *UI, m app.Message) D {
 	th := u.th
-	return Surface{Bg: withAlpha(th.Pal.Danger, 0x14), Border: withAlpha(th.Pal.Danger, 0x40), Radius: 14}.Layout(gtx, func(gtx C) D {
+	return Surface{Bg: th.Pal.DangerBg, Border: withAlpha(th.Pal.Danger, 0x50), Radius: 14}.Layout(gtx, func(gtx C) D {
 		gtx.Constraints.Min.X = gtx.Constraints.Max.X
 		return layout.UniformInset(14).Layout(gtx, func(gtx C) D {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -479,21 +562,18 @@ func (c *ChatScreen) errorCard(gtx C, u *UI, m app.Message) D {
 
 func (c *ChatScreen) actionRow(gtx C, u *UI, m app.Message, st *msgState, last bool) D {
 	th := u.th
-	meta := ""
-	if spec, ok := app.FindSpec(m.ModelID); ok {
-		meta = spec.Name
-	}
+	var parts []string
 	if m.TokensPerSec > 0 {
-		meta += fmt.Sprintf(" · %.1f tok/s", m.TokensPerSec)
+		parts = append(parts, fmt.Sprintf("%.1f tok/s", m.TokensPerSec))
 	}
 	switch m.StopReason {
 	case "cancelled":
-		meta += " · stopped"
+		parts = append(parts, "stopped")
 	case "length":
-		meta += " · length limit"
+		parts = append(parts, "length limit")
 	}
 	if m.RouteReason != "" {
-		meta += " · auto: " + m.RouteReason
+		parts = append(parts, "auto: "+m.RouteReason)
 	}
 	return layout.Inset{Top: 4}.Layout(gtx, func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
@@ -503,17 +583,17 @@ func (c *ChatScreen) actionRow(gtx C, u *UI, m app.Message, st *msgState, last b
 					icon = ic.Done
 					gtx.Execute(op.InvalidateCmd{At: st.copiedAt.Add(1500 * time.Millisecond)})
 				}
-				return IconButtonSized(gtx, &st.copy, icon, th.Pal.TextMuted, 17, 36)
+				return IconButtonSized(gtx, &st.copy, icon, th.Pal.TextFaint, 17, 36)
 			}),
 			layout.Rigid(func(gtx C) D {
 				if !last {
 					return D{}
 				}
-				return IconButtonSized(gtx, &c.regen, ic.Refresh, th.Pal.TextMuted, 18, 36)
+				return IconButtonSized(gtx, &c.regen, ic.Refresh, th.Pal.TextFaint, 18, 36)
 			}),
 			layout.Rigid(Gap(4)),
 			layout.Flexed(1, func(gtx C) D {
-				l := Lbl(th, 11.5, th.Pal.TextFaint, font.Normal, strings.TrimPrefix(meta, " · "))
+				l := Lbl(th, 11.5, th.Pal.TextFaint, font.Normal, strings.Join(parts, " · "))
 				l.MaxLines = 1
 				l.Truncator = "…"
 				return l.Layout(gtx)
@@ -522,122 +602,108 @@ func (c *ChatScreen) actionRow(gtx C, u *UI, m app.Message, st *msgState, last b
 	})
 }
 
+// composer is the glass "Ask anything…" box.
 func (c *ChatScreen) composer(gtx C, u *UI, view app.ChatView, installed []app.ModelSpec) D {
 	th, a := u.th, u.a
-	mode, model := modelLabel(a, view.Conv)
-	status, statusCol := "", th.Pal.TextFaint
+	focused := gtx.Focused(&c.editor)
 	st := a.Runtime.Status()
+	busy := ""
 	switch {
 	case view.Streaming && st.Phase == app.PhaseLoading:
-		status, statusCol = fmt.Sprintf("Loading model %d%%", int(st.Progress*100)), th.Pal.Warning
-	case view.Streaming && view.StreamTokens > 1:
-		tps := float64(view.StreamTokens) / max(0.001, time.Since(view.StreamStart).Seconds())
-		status, statusCol = fmt.Sprintf("Generating · %.0f tok/s", tps), th.Pal.AccentHi
+		busy = fmt.Sprintf("Loading model · %d%%", int(st.Progress*100))
 	case view.Streaming:
-		status, statusCol = "Thinking…", th.Pal.AccentHi
-	case len(installed) == 0:
-		status = "No model downloaded"
-	default:
-		status = "On-device · offline"
+		busy = "Generating…"
 	}
-
-	return layout.Inset{Left: 12, Right: 12, Bottom: 10, Top: 4}.Layout(gtx, func(gtx C) D {
+	if c.composerLP.Update(gtx) {
+		c.edit.open = true
+		gtx.Execute(key.FocusCmd{Tag: &c.editor})
+	}
+	hintText := "Ask anything…"
+	if len(installed) == 0 {
+		hintText = "Download a model to start chatting"
+	}
+	return layout.Inset{Left: 12, Right: 12, Bottom: 6}.Layout(gtx, func(gtx C) D {
 		return layout.Center.Layout(gtx, func(gtx C) D {
 			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(760))
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				// Model + status line.
-				layout.Rigid(func(gtx C) D {
-					return layout.Inset{Left: 4, Right: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
-						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-							layout.Rigid(func(gtx C) D {
-								return c.modelChip.Layout(gtx, func(gtx C) D {
-									return Surface{Bg: th.Pal.Surface2, Border: th.Pal.Border, Radius: 14}.Layout(gtx, func(gtx C) D {
-										return layout.Inset{Left: 10, Right: 6, Top: 5, Bottom: 5}.Layout(gtx, func(gtx C) D {
-											return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-												layout.Rigid(func(gtx C) D {
-													s := gtx.Dp(14)
-													gtx.Constraints = layout.Exact(image.Pt(s, s))
-													icon := ic.Bolt
-													if mode == "Manual" {
-														icon = ic.Memory
-													}
-													return icon.Layout(gtx, th.Pal.AccentHi)
-												}),
-												layout.Rigid(Gap(6)),
-												layout.Rigid(func(gtx C) D {
-													gtx.Constraints.Max.X = gtx.Dp(190)
-													l := Lbl(th, 12.5, th.Pal.Text, font.Medium, mode+" · "+model)
-													l.MaxLines = 1
-													l.Truncator = "…"
-													return l.Layout(gtx)
-												}),
-												layout.Rigid(func(gtx C) D {
-													s := gtx.Dp(16)
-													gtx.Constraints = layout.Exact(image.Pt(s, s))
-													return ic.ChevronDown.Layout(gtx, th.Pal.TextMuted)
-												}),
-											)
-										})
-									})
-								})
-							}),
-							layout.Flexed(1, func(gtx C) D {
-								return layout.E.Layout(gtx, func(gtx C) D {
-									l := Lbl(th, 12, statusCol, font.Medium, status)
-									l.MaxLines = 1
-									l.Alignment = text.End
-									return l.Layout(gtx)
-								})
-							}),
-						)
-					})
-				}),
-				// Input pill.
-				layout.Rigid(func(gtx C) D {
-					return Surface{Bg: th.Pal.Surface2, Border: th.Pal.BorderStrong, Radius: 24}.Layout(gtx, func(gtx C) D {
-						return layout.Inset{Left: 18, Right: 6, Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
-							return layout.Flex{Alignment: layout.End}.Layout(gtx,
-								layout.Flexed(1, func(gtx C) D {
-									return layout.Inset{Top: 8, Bottom: 8, Right: 8}.Layout(gtx, func(gtx C) D {
-										gtx.Constraints.Max.Y = gtx.Dp(150)
-										e := material.Editor(th.Theme, &c.editor, "Message SmolChat")
-										e.Color, e.HintColor = th.Pal.Text, th.Pal.TextFaint
-										e.SelectionColor = withAlpha(th.Pal.Accent, 0x60)
-										e.TextSize = 16
-										e.LineHeightScale = 1.3
-										return e.Layout(gtx)
-									})
-								}),
-								layout.Rigid(func(gtx C) D { return c.sendButton(gtx, th, view) }),
-							)
-						})
-					})
-				}),
-			)
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return withLongPress(gtx, &c.composerLP, func(gtx C) D { return c.composerBox(gtx, th, view, focused, busy, hintText) })
 		})
 	})
 }
 
+func (c *ChatScreen) composerBox(gtx C, th *Theme, view app.ChatView, focused bool, busy, hintText string) D {
+	return layout.Background{}.Layout(gtx,
+		func(gtx C) D {
+			sz := gtx.Constraints.Min
+			r := gtx.Dp(24)
+			fillRRect(gtx, sz, r, withAlpha(th.Pal.Glass, 0xf0))
+			edge := th.Pal.BorderStrong
+			if focused || view.Streaming {
+				edge = withAlpha(th.Pal.Accent, 0xb0)
+			}
+			strokeRRect(gtx, sz, r, float32(gtx.Dp(1.2)), edge)
+			return D{Size: sz}
+		},
+		func(gtx C) D {
+			return layout.Inset{Left: 16, Right: 10, Top: 14, Bottom: 10}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx C) D {
+						return layout.Flex{}.Layout(gtx,
+							layout.Rigid(func(gtx C) D {
+								return layout.Inset{Top: 2, Right: 10}.Layout(gtx, func(gtx C) D { return SparkleIcon(gtx, 17, th.Pal.Accent) })
+							}),
+							layout.Flexed(1, func(gtx C) D {
+								gtx.Constraints.Max.Y = gtx.Dp(140)
+								e := material.Editor(th.Theme, &c.editor, hintText)
+								e.Color, e.HintColor = th.Pal.Text, th.Pal.TextFaint
+								e.SelectionColor = withAlpha(th.Pal.Accent, 0x60)
+								e.TextSize = 16
+								e.LineHeightScale = 1.3
+								return e.Layout(gtx)
+							}),
+						)
+					}),
+					layout.Rigid(Gap(6)),
+					layout.Rigid(func(gtx C) D {
+						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+							layout.Flexed(1, func(gtx C) D {
+								if busy == "" {
+									return D{Size: image.Pt(gtx.Constraints.Min.X, 0)}
+								}
+								return layout.Inset{Left: 2}.Layout(gtx, Lbl(th, 12, th.Pal.AccentHi, font.Medium, busy).Layout)
+							}),
+							layout.Rigid(func(gtx C) D { return c.sendButton(gtx, th, view) }),
+						)
+					}),
+				)
+			})
+		})
+}
+
 func (c *ChatScreen) sendButton(gtx C, th *Theme, view app.ChatView) D {
-	empty := strings.TrimSpace(c.editor.Text()) == ""
-	bg, fg := th.Pal.Text, th.Pal.Bg
-	icon := ic.Send
-	if view.Streaming {
-		icon = ic.Stop
-	} else if empty {
-		bg, fg = th.Pal.Elevated, th.Pal.TextFaint
-	}
+	enabled := view.Streaming || strings.TrimSpace(c.editor.Text()) != ""
 	return c.send.Layout(gtx, func(gtx C) D {
-		s := gtx.Dp(38)
+		s := gtx.Dp(36)
 		sz := image.Pt(s, s)
-		paint := func() {
-			fillRRect(gtx, sz, s/2, bg)
-			pressOverlay(gtx, &c.send, sz, s/2)
-		}
-		paint()
-		is := gtx.Dp(20)
-		if view.Streaming {
-			is = gtx.Dp(18)
+		func() {
+			defer clip.UniformRRect(image.Rectangle{Max: sz}, s/2).Push(gtx.Ops).Pop()
+			top, bot := th.Pal.Elevated, th.Pal.Elevated
+			switch {
+			case view.Streaming:
+				top, bot = th.Pal.Primary, th.Pal.Primary
+			case enabled:
+				top, bot = mix(th.Pal.Accent, rgb(0xffffff), 0.18), mix(th.Pal.Accent, rgb(0x000000), 0.15)
+			}
+			paint.LinearGradientOp{Stop1: f32.Pt(0, 0), Color1: top, Stop2: f32.Pt(0, float32(s)), Color2: bot}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+		}()
+		pressOverlay(gtx, &c.send, sz, s/2)
+		icon, fg, is := ic.Send, th.Pal.OnAccent, gtx.Dp(19)
+		switch {
+		case view.Streaming:
+			icon, fg, is = ic.Stop, th.Pal.OnPrimary, gtx.Dp(17)
+		case !enabled:
+			fg = th.Pal.TextFaint
 		}
 		off := (s - is) / 2
 		defer op.Offset(image.Pt(off, off)).Push(gtx.Ops).Pop()
@@ -647,29 +713,10 @@ func (c *ChatScreen) sendButton(gtx C, th *Theme, view app.ChatView) D {
 	})
 }
 
-// familyBadge is a small rounded tile with the model family initials.
-func familyBadge(gtx C, th *Theme, m app.ModelSpec) D {
-	s := gtx.Dp(40)
-	sz := image.Pt(s, s)
-	tint := th.Pal.Accent
-	switch m.Family {
-	case "SmolLM":
-		tint = rgb(0x6fb6ff)
-	case "SmolLM3":
-		tint = rgb(0xf3a35a)
-	case "SmolVLM", "SmolVLM2":
-		tint = rgb(0x4fd0b0)
-	case "SmolDocling":
-		tint = rgb(0xf37aa8)
-	case "ColSmol":
-		tint = rgb(0xc9c96a)
-	}
-	fillRRect(gtx, sz, gtx.Dp(12), withAlpha(tint, 0x2c))
-	label := m.Params
-	defer clip.Rect{Max: sz}.Push(gtx.Ops).Pop()
-	gtx.Constraints = layout.Exact(sz)
-	layout.Center.Layout(gtx, func(gtx C) D {
-		return Lbl(th, unit.Sp(12), tint, font.Bold, label).Layout(gtx)
+// GlassCard is the Mac's frosted card surface.
+func GlassCard(gtx C, th *Theme, w layout.Widget) D {
+	return Surface{Bg: withAlpha(th.Pal.Glass, 0xeb), Border: th.Pal.BorderStrong, Radius: 18}.Layout(gtx, func(gtx C) D {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return layout.UniformInset(18).Layout(gtx, w)
 	})
-	return D{Size: sz}
 }

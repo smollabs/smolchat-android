@@ -73,7 +73,8 @@ func TestScreens(t *testing.T) {
 		png.Encode(f, img)
 	}
 
-	frame("01-splash", 200*time.Millisecond)
+	frame("01a-splash", 500*time.Millisecond)
+	frame("01b-splash", 1300*time.Millisecond)
 
 	a, err := app.New(app.Options{DataDir: dir, Engine: llama.New()})
 	if err != nil {
@@ -81,7 +82,10 @@ func TestScreens(t *testing.T) {
 	}
 	defer a.Close()
 	u.SetApp(a, nil)
-	frame("02-welcome", 600*time.Millisecond)
+	frame("02-welcome", 1500*time.Millisecond)
+	if u.showing {
+		t.Fatal("splash did not finish")
+	}
 
 	if len(a.Models.Installed()) > 0 {
 		u.chat.editor.SetText("Hello! What can you do?")
@@ -110,6 +114,25 @@ func TestScreens(t *testing.T) {
 	frame("04b-keyboard", 100*time.Millisecond)
 	bottom = 18
 
+	if msgs := a.Chat().Messages; len(msgs) > 1 {
+		u.msgMenu.Show(msgs[1], false)
+		frame("15-message-menu", 600*time.Millisecond)
+		u.back()
+		frame("_", 500*time.Millisecond)
+		u.sel.Open(msgs[1].Content)
+		u.navigate(screenSelect)
+		u.sel.txt.start, u.sel.txt.end = 0, 40
+		frame("16-select-text", 600*time.Millisecond)
+		u.back()
+		frame("_", 600*time.Millisecond)
+	}
+	u.chat.edit.open = true
+	u.chat.editor.SetText("draft message")
+	u.chat.editor.SetCaret(0, 5)
+	frame("17-edit-bar", 200*time.Millisecond)
+	u.chat.edit.open = false
+	u.chat.editor.SetText("")
+
 	u.drawer.Open()
 	frame("05-drawer", 600*time.Millisecond)
 	u.drawer.Close()
@@ -122,12 +145,27 @@ func TestScreens(t *testing.T) {
 
 	u.navigate(screenLibrary)
 	frame("07-library", 600*time.Millisecond)
-	u.lib.cat = app.CategoryVision
+	u.lib.tab = 4 // Vision
 	frame("08-library-vision", 300*time.Millisecond)
-	u.lib.cat = app.CategoryText
+	u.lib.tab = 0
 
 	u.navigate(screenSettings)
 	frame("09-settings", 600*time.Millisecond)
+
+	// Light theme with a blue accent, then dark orange (as in the Mac shots).
+	a.ApplySettings(func(s *app.Settings) { s.Theme, s.Accent = "light", "blue" })
+	frame("11-settings-light", 300*time.Millisecond)
+	u.navigate(screenChat)
+	a.NewChat()
+	frame("12-welcome-light", 900*time.Millisecond)
+	a.ApplySettings(func(s *app.Settings) { s.Theme, s.Accent = "dark", "orange" })
+	frame("13-welcome-orange", 300*time.Millisecond)
+	a.ApplySettings(func(s *app.Settings) { s.Theme, s.Accent = "dark", "violet" })
+	u.drawer.Open()
+	frame("14-drawer", 600*time.Millisecond)
+	u.drawer.Close()
+	frame("_", 600*time.Millisecond)
+	u.navigate(screenSettings)
 
 	u.navigate(screenChat)
 	u.dialog.Confirm("Delete chat?", "“Markdown sample” will be permanently deleted.", "Delete", true, nil)

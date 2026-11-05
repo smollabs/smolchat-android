@@ -42,6 +42,8 @@ type App struct {
 	notices  []Notice
 	noticeID int
 	online   int // -1 unknown, 0 offline, 1 online
+
+	themeChecked time.Time
 }
 
 // Options configure New.
@@ -139,6 +141,28 @@ func (a *App) RefreshDevice() {
 		a.device = d
 		a.mu.Unlock()
 		a.invalidate()
+	}()
+}
+
+// RefreshSystemTheme re-reads the OS dark-mode setting in the background
+// (at most every two seconds); it invalidates the UI when it changed.
+func (a *App) RefreshSystemTheme() {
+	a.mu.Lock()
+	if time.Since(a.themeChecked) < 2*time.Second {
+		a.mu.Unlock()
+		return
+	}
+	a.themeChecked = time.Now()
+	a.mu.Unlock()
+	go func() {
+		dark := systemDark()
+		a.mu.Lock()
+		changed := a.device.SystemDark != dark
+		a.device.SystemDark = dark
+		a.mu.Unlock()
+		if changed {
+			a.invalidate()
+		}
 	}()
 }
 

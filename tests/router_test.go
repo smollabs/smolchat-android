@@ -172,3 +172,15 @@ func TestRuntimeKeepsOneModel(t *testing.T) {
 		t.Fatal("UnloadIf did not unload")
 	}
 }
+
+func TestPreferenceShiftsTier(t *testing.T) {
+	small, mid, big := spec(t, "smollm2-135m-instruct-q8"), spec(t, "smollm2-360m-instruct-q8"), spec(t, "smollm2-1.7b-instruct-q4km")
+	in := app.RouteInput{Installed: []app.ModelSpec{small, mid, big}, Device: app.DeviceInfo{TotalRAM: 8 * gb}}
+	q := app.RouteRequest{Query: "Explain how vaccines work"}
+	for pref, want := range map[string]string{"speed": small.ID, "balanced": mid.ID, "quality": big.ID} {
+		in.Preference = pref
+		if r, _ := app.SelectModel(q, in); r.Model.ID != want {
+			t.Errorf("%s: got %s, want %s", pref, r.Model.ID, want)
+		}
+	}
+}

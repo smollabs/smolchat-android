@@ -271,15 +271,10 @@ func isWord(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
 
 const bodySize = unit.Sp(15.5)
 
-var (
-	colInlineCode = rgb(0xf2b48a)
-	colLink       = rgb(0xa9a4ff)
-)
-
 func (th *Theme) spans(src []inline, size unit.Sp, col color.NRGBA, weight font.Weight) []richtext.SpanStyle {
 	out := make([]richtext.SpanStyle, 0, len(src))
 	for _, in := range src {
-		f := font.Font{Typeface: interFace, Weight: weight}
+		f := font.Font{Typeface: uiFace, Weight: weight}
 		c := col
 		sz := size
 		if in.bold {
@@ -293,11 +288,11 @@ func (th *Theme) spans(src []inline, size unit.Sp, col color.NRGBA, weight font.
 		}
 		if in.code {
 			f = th.Mono
-			c = colInlineCode
+			c = th.Pal.InlineCode
 			sz = size - 1
 		}
 		if in.link {
-			c = colLink
+			c = th.Pal.AccentHi
 		}
 		out = append(out, richtext.SpanStyle{Font: f, Size: sz, Color: c, Content: in.text})
 	}
@@ -306,6 +301,7 @@ func (th *Theme) spans(src []inline, size unit.Sp, col color.NRGBA, weight font.
 
 // Markdown holds the parsed form and widget state of one message.
 type Markdown struct {
+	pal    Palette
 	src    string
 	blocks []mdBlock
 	spans  [][]richtext.SpanStyle // per block (or per list item, flattened)
@@ -319,10 +315,10 @@ type Markdown struct {
 
 // Set updates the source, re-parsing only when it changed.
 func (m *Markdown) Set(th *Theme, src string) {
-	if src == m.src && m.blocks != nil {
+	if src == m.src && m.blocks != nil && m.pal == th.Pal {
 		return
 	}
-	m.src = src
+	m.src, m.pal = src, th.Pal
 	m.blocks = parseMarkdown(src)
 	m.spans = m.spans[:0]
 	for _, b := range m.blocks {
@@ -459,12 +455,18 @@ func (m *Markdown) code(gtx C, th *Theme, b mdBlock, bi, idx int) D {
 	if b.kind == bTable {
 		label = "table"
 	}
-	return Surface{Bg: th.Pal.CodeBg, Border: th.Pal.Border, Radius: 12}.Layout(gtx, func(gtx C) D {
+	return Surface{Bg: th.Pal.CodeBg, Border: th.Pal.BorderStrong, Radius: 12}.Layout(gtx, func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx C) D {
 				return layout.Inset{Left: 14, Right: 4, Top: 2, Bottom: 2}.Layout(gtx, func(gtx C) D {
 					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Flexed(1, Lbl(th, 12, th.Pal.TextFaint, font.Medium, label).Layout),
+						layout.Rigid(func(gtx C) D {
+							s := gtx.Dp(15)
+							gtx.Constraints = layout.Exact(image.Pt(s, s))
+							return ic.Code.Layout(gtx, th.Pal.TextFaint)
+						}),
+						layout.Rigid(Gap(7)),
+						layout.Flexed(1, Lbl(th, 12.5, th.Pal.TextMuted, font.Medium, label).Layout),
 						layout.Rigid(func(gtx C) D {
 							txt := "Copy"
 							if gtx.Now.Sub(m.copied[bi]) < 1800*time.Millisecond {
@@ -543,16 +545,6 @@ func (m *Markdown) thinkBlock(gtx C, th *Theme, b mdBlock, bi, idx int) D {
 
 // ---- syntax highlighting ----------------------------------------------------
 
-var (
-	colKeyword = rgb(0xc4a1ff)
-	colString  = rgb(0xa8d991)
-	colNumber  = rgb(0xf5a97f)
-	colComment = rgb(0x6d6d78)
-	colFunc    = rgb(0x8ab4ff)
-	colType    = rgb(0xf3cf7a)
-	colCode    = rgb(0xd6d6de)
-)
-
 var keywords = map[string]bool{}
 
 func init() {
@@ -607,7 +599,7 @@ func highlight(th *Theme, code, lang string) []richtext.SpanStyle {
 			for j < len(rs) && rs[j] != '\n' {
 				j++
 			}
-			add(string(rs[i:j]), colComment, true)
+			add(string(rs[i:j]), pal.SynComment, true)
 			i = j
 		case c == '/' && i+1 < len(rs) && rs[i+1] == '*':
 			j := i + 2
@@ -615,7 +607,7 @@ func highlight(th *Theme, code, lang string) []richtext.SpanStyle {
 				j++
 			}
 			j = min(j+2, len(rs))
-			add(string(rs[i:j]), colComment, true)
+			add(string(rs[i:j]), pal.SynComment, true)
 			i = j
 		case c == '"' || c == '\'' || c == '`':
 			j := i + 1
@@ -626,14 +618,14 @@ func highlight(th *Theme, code, lang string) []richtext.SpanStyle {
 				j++
 			}
 			j = min(j+1, len(rs))
-			add(string(rs[i:j]), colString, false)
+			add(string(rs[i:j]), pal.SynString, false)
 			i = j
 		case unicode.IsDigit(c):
 			j := i
 			for j < len(rs) && (unicode.IsDigit(rs[j]) || rs[j] == '.' || rs[j] == 'x' || rs[j] == '_' || (rs[j] >= 'a' && rs[j] <= 'f')) {
 				j++
 			}
-			add(string(rs[i:j]), colNumber, false)
+			add(string(rs[i:j]), pal.SynNumber, false)
 			i = j
 		case unicode.IsLetter(c) || c == '_' || c == '$':
 			j := i
@@ -641,19 +633,19 @@ func highlight(th *Theme, code, lang string) []richtext.SpanStyle {
 				j++
 			}
 			w := string(rs[i:j])
-			col := colCode
+			col := pal.SynText
 			switch {
 			case keywords[w]:
-				col = colKeyword
+				col = pal.SynKeyword
 			case j < len(rs) && rs[j] == '(':
-				col = colFunc
+				col = pal.SynFunc
 			case unicode.IsUpper(rs[i]) && len(w) > 1:
-				col = colType
+				col = pal.SynType
 			}
 			add(w, col, false)
 			i = j
 		default:
-			add(string(c), colCode, false)
+			add(string(c), pal.SynText, false)
 			i++
 		}
 	}

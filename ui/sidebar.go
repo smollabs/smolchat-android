@@ -98,9 +98,10 @@ func abs32(v float32) float32 {
 
 type convRow struct {
 	open, more widget.Clickable
+	lp         longPress
 }
 
-// Drawer is the slide-in navigation panel.
+// Drawer is the slide-in navigation panel (the Mac app's sidebar).
 type Drawer struct {
 	anim       Anim
 	drag       hdrag
@@ -108,9 +109,9 @@ type Drawer struct {
 	scrim      widget.Clickable
 	search     widget.Editor
 	newChat    widget.Clickable
-	library    widget.Clickable
 	settings   widget.Clickable
-	modelCard  widget.Clickable
+	themeBtn   widget.Clickable
+	status     widget.Clickable
 	clearQuery widget.Clickable
 	list       widget.List
 	rows       map[string]*convRow
@@ -171,7 +172,6 @@ func (d *Drawer) Layout(gtx C, u *UI) D {
 	}
 	d.drag.rightOnly = false
 
-	// Scrim.
 	func() {
 		defer paint.PushOpacity(gtx.Ops, p).Pop()
 		d.scrim.Layout(gtx, func(gtx C) D {
@@ -180,15 +180,13 @@ func (d *Drawer) Layout(gtx C, u *UI) D {
 		})
 	}()
 
-	// Panel.
 	x := int(float32(w) * (p - 1))
 	func() {
 		defer op.Offset(image.Pt(x, 0)).Push(gtx.Ops).Pop()
 		pgtx := gtx
 		pgtx.Constraints = layout.Exact(image.Pt(w, full.Y))
-		paint.FillShape(gtx.Ops, u.th.Pal.Surface, clip.Rect{Max: image.Pt(w, full.Y)}.Op())
-		// Swallow taps so they don't reach the scrim.
-		func() {
+		paint.FillShape(gtx.Ops, u.th.Pal.Frame, clip.Rect{Max: image.Pt(w, full.Y)}.Op())
+		func() { // swallow taps so they don't reach the scrim
 			defer clip.Rect{Max: image.Pt(w, full.Y)}.Push(gtx.Ops).Pop()
 			event.Op(gtx.Ops, &d.rows)
 		}()
@@ -202,14 +200,20 @@ func (d *Drawer) Layout(gtx C, u *UI) D {
 }
 
 func (d *Drawer) panel(gtx C, u *UI) D {
-	th := u.th
-	a := u.a
+	th, a := u.th, u.a
+	// Actions below change state after this frame's animation step, so ask
+	// for another frame (otherwise the change waits for the next input).
+	defer func() {
+		if d.anim.Target != d.anim.V {
+			gtx.Execute(op.InvalidateCmd{})
+		}
+	}()
 	if d.newChat.Clicked(gtx) {
 		a.NewChat()
 		u.chat.focusComposer = true
 		d.Close()
 	}
-	if d.library.Clicked(gtx) {
+	if d.status.Clicked(gtx) {
 		u.navigate(screenLibrary)
 		d.Close()
 	}
@@ -217,9 +221,14 @@ func (d *Drawer) panel(gtx C, u *UI) D {
 		u.navigate(screenSettings)
 		d.Close()
 	}
-	if d.modelCard.Clicked(gtx) {
-		d.Close()
-		u.sheet.Show()
+	if d.themeBtn.Clicked(gtx) {
+		dark := !th.Pal.Dark
+		a.ApplySettings(func(s *app.Settings) {
+			s.Theme = "light"
+			if dark {
+				s.Theme = "dark"
+			}
+		})
 	}
 	if d.clearQuery.Clicked(gtx) {
 		d.search.SetText("")
@@ -245,27 +254,60 @@ func (d *Drawer) panel(gtx C, u *UI) D {
 
 	return layout.Inset{Top: u.insets.Top, Bottom: u.insets.Bottom}.Layout(gtx, func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Brand header.
+			// Brand.
 			layout.Rigid(func(gtx C) D {
-				return layout.Inset{Left: 16, Right: 8, Top: 12, Bottom: 8}.Layout(gtx, func(gtx C) D {
+				return layout.Inset{Left: 16, Right: 12, Top: 16, Bottom: 14}.Layout(gtx, func(gtx C) D {
 					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return Logo(gtx, 30, false) }),
-						layout.Rigid(Gap(10)),
+						layout.Rigid(func(gtx C) D { return LogoTile(gtx, 38) }),
+						layout.Rigid(Gap(12)),
 						layout.Flexed(1, func(gtx C) D {
 							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 								layout.Rigid(Lbl(th, 17, th.Pal.Text, font.SemiBold, "SmolChat").Layout),
-								layout.Rigid(Lbl(th, 11.5, th.Pal.TextFaint, font.Medium, "by SmolWorks").Layout),
+								layout.Rigid(Lbl(th, 12.5, th.Pal.TextFaint, font.Normal, "by SmolWorks").Layout),
 							)
 						}),
-						layout.Rigid(func(gtx C) D { return IconButton(gtx, &d.newChat, ic.NewChat, th.Pal.Text) }),
 					)
+				})
+			}),
+			// New chat.
+			layout.Rigid(func(gtx C) D {
+				return layout.Inset{Left: 10, Right: 10}.Layout(gtx, func(gtx C) D {
+					return d.newChat.Layout(gtx, func(gtx C) D {
+						return layout.Background{}.Layout(gtx,
+							func(gtx C) D {
+								sz := gtx.Constraints.Min
+								r := gtx.Dp(12)
+								fillRRect(gtx, sz, r, withAlpha(th.Pal.Glass, 0xf0))
+								strokeRRect(gtx, sz, r, float32(gtx.Dp(1)), th.Pal.BorderStrong)
+								pressOverlay(gtx, &d.newChat, sz, r)
+								return D{Size: sz}
+							},
+							func(gtx C) D {
+								gtx.Constraints.Min.X = gtx.Constraints.Max.X
+								return layout.Inset{Left: 8, Right: 8, Top: 8, Bottom: 8}.Layout(gtx, func(gtx C) D {
+									return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+										layout.Rigid(func(gtx C) D {
+											s := gtx.Dp(28)
+											fillRRect(gtx, image.Pt(s, s), gtx.Dp(8), th.Pal.AccentSoft)
+											is := gtx.Dp(18)
+											off := op.Offset(image.Pt((s-is)/2, (s-is)/2)).Push(gtx.Ops)
+											gtx.Constraints = layout.Exact(image.Pt(is, is))
+											ic.Plus.Layout(gtx, th.Pal.Accent)
+											off.Pop()
+											return D{Size: image.Pt(s, s)}
+										}),
+										layout.Rigid(Gap(12)),
+										layout.Rigid(Lbl(th, 15.5, th.Pal.Text, font.Medium, "New chat").Layout),
+									)
+								})
+							})
+					})
 				})
 			}),
 			// Search.
 			layout.Rigid(func(gtx C) D {
-				return layout.Inset{Left: 12, Right: 12, Top: 4, Bottom: 8}.Layout(gtx, func(gtx C) D {
+				return layout.Inset{Left: 10, Right: 10, Top: 10, Bottom: 6}.Layout(gtx, func(gtx C) D {
 					return layout.Stack{Alignment: layout.E}.Layout(gtx,
-						layout.Expanded(func(gtx C) D { return D{} }),
 						layout.Stacked(func(gtx C) D {
 							gtx.Constraints.Min.X = gtx.Constraints.Max.X
 							return Field(gtx, th, &d.search, "Search chats", ic.Search)
@@ -279,59 +321,26 @@ func (d *Drawer) panel(gtx C, u *UI) D {
 					)
 				})
 			}),
-			// New chat row.
-			layout.Rigid(func(gtx C) D {
-				return layout.Inset{Left: 8, Right: 8}.Layout(gtx, func(gtx C) D {
-					return navRow(gtx, th, &d.newChat, ic.Chat, "New chat", false)
-				})
-			}),
 			// History.
 			layout.Flexed(1, func(gtx C) D { return d.history(gtx, u, convs, current) }),
-			layout.Rigid(func(gtx C) D { return Divider(gtx, th.Pal.Border) }),
-			// Footer: current model + navigation.
+			// Footer: status card, theme toggle, settings.
 			layout.Rigid(func(gtx C) D {
-				return layout.Inset{Left: 8, Right: 8, Top: 8, Bottom: 8}.Layout(gtx, func(gtx C) D {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return d.currentModel(gtx, u) }),
+				return layout.Inset{Left: 10, Right: 6, Top: 8, Bottom: 10}.Layout(gtx, func(gtx C) D {
+					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Flexed(1, func(gtx C) D { return d.statusCard(gtx, u) }),
 						layout.Rigid(Gap(4)),
 						layout.Rigid(func(gtx C) D {
-							return navRow(gtx, th, &d.library, ic.Library, "Model Library", u.screen == screenLibrary)
+							icon := ic.Sun
+							if !th.Pal.Dark {
+								icon = ic.Moon
+							}
+							return IconButtonSized(gtx, &d.themeBtn, icon, th.Pal.TextMuted, 21, 42)
 						}),
-						layout.Rigid(func(gtx C) D {
-							return navRow(gtx, th, &d.settings, ic.Settings, "Settings", u.screen == screenSettings)
-						}),
+						layout.Rigid(func(gtx C) D { return IconButtonSized(gtx, &d.settings, ic.Settings, th.Pal.TextMuted, 21, 42) }),
 					)
 				})
 			}),
 		)
-	})
-}
-
-func navRow(gtx C, th *Theme, clk *widget.Clickable, icon *widget.Icon, label string, selected bool) D {
-	return clk.Layout(gtx, func(gtx C) D {
-		return layout.Background{}.Layout(gtx,
-			func(gtx C) D {
-				sz := gtx.Constraints.Min
-				if selected {
-					fillRRect(gtx, sz, gtx.Dp(10), th.Pal.Elevated)
-				}
-				pressOverlay(gtx, clk, sz, gtx.Dp(10))
-				return D{Size: sz}
-			},
-			func(gtx C) D {
-				gtx.Constraints.Min.X = gtx.Constraints.Max.X
-				return layout.Inset{Left: 10, Right: 10, Top: 11, Bottom: 11}.Layout(gtx, func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D {
-							s := gtx.Dp(20)
-							gtx.Constraints = layout.Exact(image.Pt(s, s))
-							return icon.Layout(gtx, th.Pal.TextMuted)
-						}),
-						layout.Rigid(Gap(12)),
-						layout.Flexed(1, Lbl(th, 15, th.Pal.Text, font.Medium, label).Layout),
-					)
-				})
-			})
 	})
 }
 
@@ -376,13 +385,13 @@ func (d *Drawer) history(gtx C, u *UI, convs []app.Conversation, current string)
 		if d.search.Len() > 0 {
 			msg = "No chats match “" + strings.TrimSpace(d.search.Text()) + "”."
 		}
-		return layout.Inset{Left: 20, Right: 20, Top: 24}.Layout(gtx, Lbl(th, 13.5, th.Pal.TextFaint, font.Normal, msg).Layout)
+		return layout.Inset{Left: 20, Right: 20, Top: 20}.Layout(gtx, Lbl(th, 13.5, th.Pal.TextFaint, font.Normal, msg).Layout)
 	}
 	d.list.Axis = layout.Vertical
 	return material.List(th.Theme, &d.list).Layout(gtx, len(items), func(gtx C, i int) D {
 		it := items[i]
 		if it.conv == nil {
-			return layout.Inset{Left: 18, Top: 16, Bottom: 6}.Layout(gtx, Lbl(th, 12, th.Pal.TextFaint, font.SemiBold, it.header).Layout)
+			return layout.Inset{Left: 20, Top: 18, Bottom: 6}.Layout(gtx, Lbl(th, 12.5, th.Pal.TextFaint, font.SemiBold, it.header).Layout)
 		}
 		c := *it.conv
 		row := d.rows[c.ID]
@@ -394,86 +403,109 @@ func (d *Drawer) history(gtx C, u *UI, convs []app.Conversation, current string)
 			u.report(u.a.OpenConversation(c.ID))
 			d.Close()
 		}
-		if row.more.Clicked(gtx) {
+		if row.more.Clicked(gtx) || row.lp.Update(gtx) {
 			u.actions.Show(c)
 		}
 		selected := c.ID == current
-		return layout.Inset{Left: 8, Right: 8}.Layout(gtx, func(gtx C) D {
-			return layout.Stack{Alignment: layout.E}.Layout(gtx,
-				layout.Stacked(func(gtx C) D {
-					return row.open.Layout(gtx, func(gtx C) D {
-						return layout.Background{}.Layout(gtx,
-							func(gtx C) D {
-								sz := gtx.Constraints.Min
-								if selected {
-									fillRRect(gtx, sz, gtx.Dp(10), th.Pal.Elevated)
-								}
-								pressOverlay(gtx, &row.open, sz, gtx.Dp(10))
-								return D{Size: sz}
-							},
-							func(gtx C) D {
-								gtx.Constraints.Min.X = gtx.Constraints.Max.X
-								return layout.Inset{Left: 10, Right: 44, Top: 11, Bottom: 11}.Layout(gtx, func(gtx C) D {
-									l := Lbl(th, 14.5, th.Pal.Text, font.Normal, c.Title)
-									l.MaxLines = 1
-									l.Truncator = "…"
-									l.WrapPolicy = text.WrapGraphemes
-									return l.Layout(gtx)
-								})
-							})
-					})
-				}),
-				layout.Stacked(func(gtx C) D {
-					return IconButtonSized(gtx, &row.more, ic.More, th.Pal.TextFaint, 18, 40)
-				}),
-			)
+		return layout.Inset{Left: 10, Right: 10}.Layout(gtx, func(gtx C) D {
+			return withLongPress(gtx, &row.lp, func(gtx C) D { return d.rowBody(gtx, th, row, c, selected) })
 		})
 	})
 }
 
-func (d *Drawer) currentModel(gtx C, u *UI) D {
+func (d *Drawer) rowBody(gtx C, th *Theme, row *convRow, c app.Conversation, selected bool) D {
+	return layout.Stack{Alignment: layout.E}.Layout(gtx,
+		layout.Stacked(func(gtx C) D {
+			return row.open.Layout(gtx, func(gtx C) D {
+				return layout.Background{}.Layout(gtx,
+					func(gtx C) D {
+						sz := gtx.Constraints.Min
+						r := gtx.Dp(10)
+						if selected {
+							fillRRect(gtx, sz, r, th.Pal.Elevated)
+							bar := image.Pt(gtx.Dp(3), sz.Y-gtx.Dp(16))
+							off := op.Offset(image.Pt(0, gtx.Dp(8))).Push(gtx.Ops)
+							fillRRect(gtx, bar, bar.X/2, th.Pal.Accent)
+							off.Pop()
+						}
+						pressOverlay(gtx, &row.open, sz, r)
+						return D{Size: sz}
+					},
+					func(gtx C) D {
+						gtx.Constraints.Min.X = gtx.Constraints.Max.X
+						return layout.Inset{Left: 12, Right: 44, Top: 11, Bottom: 11}.Layout(gtx, func(gtx C) D {
+							l := Lbl(th, 15, th.Pal.Text, font.Normal, c.Title)
+							l.MaxLines = 1
+							l.Truncator = "…"
+							l.WrapPolicy = text.WrapGraphemes
+							return l.Layout(gtx)
+						})
+					})
+			})
+		}),
+		layout.Stacked(func(gtx C) D {
+			return IconButtonSized(gtx, &row.more, ic.More, th.Pal.TextFaint, 18, 40)
+		}),
+	)
+}
+
+// statusCard is the Mac's "● Ready / Model Library ›" button.
+func (d *Drawer) statusCard(gtx C, u *UI) D {
 	th := u.th
 	st := u.a.Runtime.Status()
-	conv := u.a.Chat().Conv
-	name, sub := "No model loaded", "Tap to choose a model"
-	dot := th.Pal.TextFaint
-	if spec, ok := app.FindSpec(st.ModelID); ok && st.Phase != app.PhaseIdle {
-		name = spec.Name
+	title, dot := "Ready", th.Pal.TextFaint
+	if len(u.a.Models.Installed()) == 0 {
+		title = "No models yet"
+	}
+	if spec, ok := app.FindSpec(st.ModelID); ok {
 		switch st.Phase {
 		case app.PhaseLoading:
-			sub, dot = "Loading…", th.Pal.Warning
+			title, dot = "Loading "+spec.Params+"…", th.Pal.Warning
 		case app.PhaseGenerating:
-			sub, dot = "Generating", th.Pal.Accent
+			title, dot = spec.Name, th.Pal.Accent
+		case app.PhaseReady:
+			title, dot = spec.Name, th.Pal.Success
 		case app.PhaseError:
-			sub, dot = "Failed to load", th.Pal.Danger
-		default:
-			sub, dot = "Loaded · on-device", th.Pal.Success
+			title, dot = "Load failed", th.Pal.Danger
 		}
 	}
-	mode := "Auto"
-	if conv.SelectionMode == app.SelectManual {
-		mode = "Manual"
+	if u.a.Downloads.AnyActive() {
+		title, dot = "Downloading…", th.Pal.Accent
 	}
-	return d.modelCard.Layout(gtx, func(gtx C) D {
-		return Surface{Bg: th.Pal.Surface2, Border: th.Pal.Border, Radius: 14}.Layout(gtx, func(gtx C) D {
-			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return layout.UniformInset(12).Layout(gtx, func(gtx C) D {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx C) D { return Dot(gtx, dot, 8) }),
-					layout.Rigid(Gap(10)),
-					layout.Flexed(1, func(gtx C) D {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx C) D {
-								l := Lbl(th, 14, th.Pal.Text, font.SemiBold, name)
-								l.MaxLines = 1
-								return l.Layout(gtx)
-							}),
-							layout.Rigid(Lbl(th, 12, th.Pal.TextMuted, font.Normal, sub).Layout),
-						)
-					}),
-					layout.Rigid(func(gtx C) D { return Chip(gtx, th, mode, th.Pal.AccentHi, th.Pal.AccentSoft) }),
-				)
+	return d.status.Layout(gtx, func(gtx C) D {
+		return layout.Background{}.Layout(gtx,
+			func(gtx C) D {
+				sz := gtx.Constraints.Min
+				r := gtx.Dp(12)
+				fillRRect(gtx, sz, r, withAlpha(th.Pal.Glass, 0xf0))
+				strokeRRect(gtx, sz, r, float32(gtx.Dp(1)), th.Pal.BorderStrong)
+				pressOverlay(gtx, &d.status, sz, r)
+				return D{Size: sz}
+			},
+			func(gtx C) D {
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				return layout.Inset{Left: 12, Right: 8, Top: 9, Bottom: 9}.Layout(gtx, func(gtx C) D {
+					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx C) D { return Dot(gtx, dot, 8) }),
+						layout.Rigid(Gap(10)),
+						layout.Flexed(1, func(gtx C) D {
+							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+								layout.Rigid(func(gtx C) D {
+									l := Lbl(th, 14, th.Pal.Text, font.Medium, title)
+									l.MaxLines = 1
+									l.Truncator = "…"
+									return l.Layout(gtx)
+								}),
+								layout.Rigid(Lbl(th, 12, th.Pal.TextFaint, font.Normal, "Model Library").Layout),
+							)
+						}),
+						layout.Rigid(func(gtx C) D {
+							s := gtx.Dp(18)
+							gtx.Constraints = layout.Exact(image.Pt(s, s))
+							return ic.ChevronRight.Layout(gtx, th.Pal.TextFaint)
+						}),
+					)
+				})
 			})
-		})
 	})
 }

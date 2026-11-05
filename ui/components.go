@@ -6,6 +6,7 @@ import (
 	"math"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -34,39 +35,49 @@ func mustIcon(data []byte) *widget.Icon {
 var ic = struct {
 	Menu, NewChat, Send, Stop, Copy, Refresh, Settings, Library, Search, Close, Back,
 	Download, Delete, Check, ChevronDown, Edit, Auto, Memory, Storage, Offline, More,
-	Pause, Play, Info, Chat, Lock, Phone, Bolt, Shield, Tune, Done *widget.Icon
+	Pause, Play, Info, Chat, Lock, Phone, Bolt, Shield, Tune, Done,
+	Lightbulb, Compass, Code, Sun, Moon, Monitor, Folder, ChevronRight, Plus *widget.Icon
 }{
-	Menu:        mustIcon(icons.NavigationMenu),
-	NewChat:     mustIcon(icons.EditorModeEdit),
-	Send:        mustIcon(icons.NavigationArrowUpward),
-	Stop:        mustIcon(icons.AVStop),
-	Copy:        mustIcon(icons.ContentContentCopy),
-	Refresh:     mustIcon(icons.NavigationRefresh),
-	Settings:    mustIcon(icons.ActionSettings),
-	Library:     mustIcon(icons.ActionViewModule),
-	Search:      mustIcon(icons.ActionSearch),
-	Close:       mustIcon(icons.NavigationClose),
-	Back:        mustIcon(icons.NavigationArrowBack),
-	Download:    mustIcon(icons.FileFileDownload),
-	Delete:      mustIcon(icons.ActionDelete),
-	Check:       mustIcon(icons.ActionCheckCircle),
-	ChevronDown: mustIcon(icons.NavigationExpandMore),
-	Edit:        mustIcon(icons.ContentCreate),
-	Auto:        mustIcon(icons.ActionAutorenew),
-	Memory:      mustIcon(icons.HardwareMemory),
-	Storage:     mustIcon(icons.DeviceStorage),
-	Offline:     mustIcon(icons.FileCloudOff),
-	More:        mustIcon(icons.NavigationMoreVert),
-	Pause:       mustIcon(icons.AVPause),
-	Play:        mustIcon(icons.AVPlayArrow),
-	Info:        mustIcon(icons.ActionInfoOutline),
-	Chat:        mustIcon(icons.CommunicationChatBubbleOutline),
-	Lock:        mustIcon(icons.ActionLock),
-	Phone:       mustIcon(icons.HardwarePhoneAndroid),
-	Bolt:        mustIcon(icons.ImageFlashOn),
-	Shield:      mustIcon(icons.ActionVerifiedUser),
-	Tune:        mustIcon(icons.ImageTune),
-	Done:        mustIcon(icons.NavigationCheck),
+	Lightbulb:    mustIcon(icons.ActionLightbulbOutline),
+	Compass:      mustIcon(icons.ActionExplore),
+	Code:         mustIcon(icons.ActionCode),
+	Sun:          mustIcon(icons.ImageWBSunny),
+	Moon:         mustIcon(icons.ImageBrightness3),
+	Monitor:      mustIcon(icons.HardwareComputer),
+	Folder:       mustIcon(icons.FileFolderOpen),
+	ChevronRight: mustIcon(icons.NavigationChevronRight),
+	Plus:         mustIcon(icons.ContentAdd),
+	Menu:         mustIcon(icons.NavigationMenu),
+	NewChat:      mustIcon(icons.EditorModeEdit),
+	Send:         mustIcon(icons.NavigationArrowUpward),
+	Stop:         mustIcon(icons.AVStop),
+	Copy:         mustIcon(icons.ContentContentCopy),
+	Refresh:      mustIcon(icons.NavigationRefresh),
+	Settings:     mustIcon(icons.ActionSettings),
+	Library:      mustIcon(icons.ActionViewModule),
+	Search:       mustIcon(icons.ActionSearch),
+	Close:        mustIcon(icons.NavigationClose),
+	Back:         mustIcon(icons.NavigationArrowBack),
+	Download:     mustIcon(icons.FileFileDownload),
+	Delete:       mustIcon(icons.ActionDelete),
+	Check:        mustIcon(icons.ActionCheckCircle),
+	ChevronDown:  mustIcon(icons.NavigationExpandMore),
+	Edit:         mustIcon(icons.ContentCreate),
+	Auto:         mustIcon(icons.ActionAutorenew),
+	Memory:       mustIcon(icons.HardwareMemory),
+	Storage:      mustIcon(icons.DeviceStorage),
+	Offline:      mustIcon(icons.FileCloudOff),
+	More:         mustIcon(icons.NavigationMoreVert),
+	Pause:        mustIcon(icons.AVPause),
+	Play:         mustIcon(icons.AVPlayArrow),
+	Info:         mustIcon(icons.ActionInfoOutline),
+	Chat:         mustIcon(icons.CommunicationChatBubbleOutline),
+	Lock:         mustIcon(icons.ActionLock),
+	Phone:        mustIcon(icons.HardwarePhoneAndroid),
+	Bolt:         mustIcon(icons.ImageFlashOn),
+	Shield:       mustIcon(icons.ActionVerifiedUser),
+	Tune:         mustIcon(icons.ImageTune),
+	Done:         mustIcon(icons.NavigationCheck),
 }
 
 // ---- painting -------------------------------------------------------------
@@ -155,6 +166,7 @@ type ButtonKind int
 
 const (
 	BtnPrimary ButtonKind = iota
+	BtnNeutral
 	BtnSecondary
 	BtnGhost
 	BtnDanger
@@ -172,18 +184,21 @@ type Button struct {
 
 func (b Button) Layout(gtx C, th *Theme, clk *widget.Clickable) D {
 	var bg, fg, border color.NRGBA
+	gradient := false
 	switch b.Kind {
-	case BtnPrimary:
-		bg, fg = th.Pal.Text, th.Pal.Bg
+	case BtnPrimary: // accent gradient, as the Mac's GlowButton
+		bg, fg, gradient = th.Pal.Accent, th.Pal.OnAccent, true
+	case BtnNeutral:
+		bg, fg = th.Pal.Primary, th.Pal.OnPrimary
 	case BtnSecondary:
-		bg, fg, border = th.Pal.Elevated, th.Pal.Text, th.Pal.BorderStrong
+		fg, border = th.Pal.Text, th.Pal.BorderStrong
 	case BtnGhost:
 		fg = th.Pal.TextMuted
 	case BtnDanger:
 		bg, fg = withAlpha(th.Pal.Danger, 0x26), th.Pal.Danger
 	}
 	if b.Disabled {
-		bg, fg = withAlpha(bg, 0x60), withAlpha(fg, 0x80)
+		bg, fg, gradient = withAlpha(bg, 0x60), withAlpha(fg, 0x80), false
 		gtx = gtx.Disabled()
 	}
 	h := unit.Dp(44)
@@ -201,7 +216,17 @@ func (b Button) Layout(gtx C, th *Theme, clk *widget.Clickable) D {
 			func(gtx C) D {
 				sz := gtx.Constraints.Min
 				r := sz.Y / 2
-				if bg.A > 0 {
+				switch {
+				case gradient:
+					func() {
+						defer clip.UniformRRect(image.Rectangle{Max: sz}, r).Push(gtx.Ops).Pop()
+						paint.LinearGradientOp{
+							Stop1: f32.Pt(0, 0), Color1: mix(bg, rgb(0xffffff), 0.12),
+							Stop2: f32.Pt(0, float32(sz.Y)), Color2: mix(bg, rgb(0x000000), 0.22),
+						}.Add(gtx.Ops)
+						paint.PaintOp{}.Add(gtx.Ops)
+					}()
+				case bg.A > 0:
 					fillRRect(gtx, sz, r, bg)
 				}
 				if border.A > 0 {
@@ -343,7 +368,7 @@ func easeOut(t float64) float64   { return 1 - math.Pow(1-t, 3) }
 
 // Field draws a rounded single- or multi-line text field.
 func Field(gtx C, th *Theme, ed *widget.Editor, hint string, icon *widget.Icon) D {
-	return Surface{Bg: th.Pal.Surface2, Border: th.Pal.Border, Radius: 12}.Layout(gtx, func(gtx C) D {
+	return Surface{Bg: th.Pal.Glass, Border: th.Pal.BorderStrong, Radius: 12}.Layout(gtx, func(gtx C) D {
 		return layout.Inset{Left: 12, Right: 12, Top: 10, Bottom: 10}.Layout(gtx, func(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx C) D {
@@ -370,9 +395,49 @@ func Field(gtx C, th *Theme, ed *widget.Editor, hint string, icon *widget.Icon) 
 
 // Section renders an uppercase section caption.
 func Section(gtx C, th *Theme, s string) D {
-	return layout.Inset{Top: 18, Bottom: 8, Left: 4}.Layout(gtx, func(gtx C) D {
+	return layout.Inset{Top: 22, Bottom: 10}.Layout(gtx, func(gtx C) D {
 		return Lbl(th, 12, th.Pal.TextFaint, font.SemiBold, s).Layout(gtx)
 	})
+}
+
+// Toggle is an iOS-style switch; it returns true when flipped.
+type Toggle struct {
+	clk  widget.Clickable
+	anim Anim
+	init bool
+}
+
+func (t *Toggle) Layout(gtx C, th *Theme, on bool) (D, bool) {
+	changed := t.clk.Clicked(gtx)
+	if changed {
+		on = !on
+	}
+	target := float32(0)
+	if on {
+		target = 1
+	}
+	if !t.init {
+		t.anim.Set(target)
+		t.init = true
+	}
+	t.anim.Target = target
+	t.anim.Rate = 18
+	p := t.anim.Step(gtx)
+	d := t.clk.Layout(gtx, func(gtx C) D {
+		w, h := gtx.Dp(46), gtx.Dp(28)
+		track := mix(th.Pal.Elevated, th.Pal.Accent, p)
+		if !th.Pal.Dark && p == 0 {
+			track = argb(0x26000000)
+		}
+		fillRRect(gtx, image.Pt(w, h), h/2, track)
+		k := h - gtx.Dp(6)
+		x := gtx.Dp(3) + int(float32(w-k-gtx.Dp(6))*p)
+		off := op.Offset(image.Pt(x, gtx.Dp(3))).Push(gtx.Ops)
+		fillRRect(gtx, image.Pt(k, k), k/2, rgb(0xffffff))
+		off.Pop()
+		return D{Size: image.Pt(w, h)}
+	})
+	return d, changed
 }
 
 // centered aligns a single line label in its constraints.

@@ -40,6 +40,9 @@ type RouteInput struct {
 	Device      DeviceInfo
 	ContextSize int
 	LoadedID    string // currently resident model (switching costs a load)
+	// Preference shifts the tier: "speed" favours smaller models,
+	// "quality" larger ones; anything else is balanced.
+	Preference string
 }
 
 // Route is the router's decision.
@@ -161,9 +164,16 @@ func SelectModel(req RouteRequest, in RouteInput) (Route, error) {
 	}
 
 	cx := Classify(req.Query, req.HistoryTurns)
+	tier := cx // the tier we aim for, after the user's preference
+	switch {
+	case in.Preference == "speed" && tier > Simple:
+		tier--
+	case in.Preference == "quality" && tier < Complex:
+		tier++
+	}
 	// Desired size tier per complexity (in millions of parameters).
 	lo, hi := 0, 400
-	switch cx {
+	switch tier {
 	case Moderate:
 		lo, hi = 300, 1000
 	case Complex:
@@ -176,7 +186,7 @@ func SelectModel(req RouteRequest, in RouteInput) (Route, error) {
 		if inTier {
 			s += 100
 		}
-		switch cx {
+		switch tier {
 		case Simple:
 			s -= m.ParamsM / 50 // smaller is better
 		default:

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"image/color"
 	"log"
 	"os"
 	"path/filepath"
@@ -109,6 +110,11 @@ func newWindow() *gioapp.Window {
 func runWindow() {
 	w := newWindow()
 	u := ui.New()
+	u.OnBarColor = func(c color.NRGBA) { // keep system bars matching the theme
+		if w := win.Load(); w != nil {
+			w.Option(gioapp.StatusColor(c), gioapp.NavigationColor(c))
+		}
+	}
 
 	initDone := make(chan initResult, 1)
 	go func() {
@@ -144,6 +150,8 @@ func runWindow() {
 			// Android: the process (and any foreground download) may live on;
 			// a relaunch creates a new window on the same core.
 			w = newWindow()
+		default:
+			platformEvent(e)
 		case gioapp.FrameEvent:
 			select {
 			case r := <-initDone:

@@ -15,12 +15,15 @@ The app is written in Go with [Gio](https://gioui.org) for the whole UI.
 
 | | |
 |---|---|
+| **Design** | Mobile port of SmolChat for Mac: animated mascot splash, accent-tinted glow backdrop, System/Light/Dark themes with six accent colours, glass composer, quick-action chips |
+| **Android-native feel** | Back stack (Back and the system back gesture return to the previous page; overlays close first), swipe right on a page to go back, haptics on long-press |
+| **Text** | Long-press a message for Copy / Select text / Share / Regenerate / Edit & resend; touch text selection with handles; Paste / Select all / Cut / Copy in the composer; emoji everywhere (bundled Noto Emoji) |
 | **Chat** | ChatGPT-style mobile UI, streaming replies, Markdown with code highlighting, copy, regenerate, stop |
 | **History** | SQLite conversations with search, date groups, rename and delete; survives restarts |
 | **Model Library** | Verified Smol catalog by category, device-fit hints, download progress/speed/ETA, pause, resume, cancel, delete |
 | **Downloads** | Resumable HTTP range downloads, SHA-256 verification, storage checks, retries; an Android foreground service keeps them alive in the background |
 | **Runtime** | Lazy loading, live switching without restart, one model in RAM at a time, KV-cache reuse across turns |
-| **Model selection** | **Auto** picks a model per message from complexity, device RAM, thermal state and the loaded model. **Manual** pins a model for the conversation |
+| **Model selection** | **Auto** picks a model per message from complexity, device RAM, thermal state, the loaded model and your Speed/Balanced/Quality preference. **Manual** pins a model for the conversation |
 | **Hardware aware** | RAM, storage, CPU features, Android version and thermal status feed recommendations and routing |
 
 ## Supported models
@@ -93,6 +96,22 @@ SMOLCHAT_SHOTS=/tmp/shots go test ./ui -run Screens   # headless screenshots of 
 backend. With a test model it also runs a real conversation through the whole
 stack: router, runtime, llama.cpp, SQLite and Markdown rendering.
 
+### Verified on Android
+
+Tested on an Android 15 (API 35) arm64 emulator with 3 GB RAM and 4 cores:
+
+* The app launches with no models and recommends one for the device.
+* Downloads from Hugging Face show speed and ETA and pass SHA-256 verification. They continue in the background under the foreground service, and after a force-kill mid-download they resume from the partial file.
+* A downloaded model is usable immediately, with no restart.
+* llama.cpp inference runs on-device and streams at about 11–15 tok/s, including in airplane mode. Stop works.
+* Live switching between SmolLM2 360M and 135M (Auto and Manual).
+* Chats persist across a force-kill.
+* Keyboard insets, swipe and Back navigation, and thermal status via JNI all work.
+
+Not yet tested on a physical phone. Tiny models (135M/360M) sometimes echo
+short prompts. That reproduces with the same weights on desktop, so it comes
+from the model, not the engine.
+
 ## Architecture
 
 ```
@@ -148,4 +167,5 @@ or to verify their metadata. It has no analytics and no cloud inference.
 SmolChat's code belongs to SmolWorks. Models are distributed by their publishers
 under their own licenses (Apache-2.0 for SmolLM/SmolVLM, CDLA-Permissive-2.0
 for SmolDocling, MIT for ColSmol). llama.cpp is MIT-licensed. Inter and
-JetBrains Mono are under the SIL Open Font License (`assets/fonts/OFL-*.txt`).
+JetBrains Mono and Noto Emoji are under the SIL Open Font License
+(`assets/fonts/OFL-*.txt`). Brand artwork masters live in `assets/brand/`.

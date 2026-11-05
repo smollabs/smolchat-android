@@ -292,10 +292,12 @@ func (e *Engine) tokenizeChat(msgs []app.ChatMessage) ([]C.int32_t, error) {
 func (e *Engine) run(ctx context.Context, s *C.smol_ctx, tokens []C.int32_t, opts app.GenerationOptions, nCtx int, out chan<- app.Token) app.Token {
 	start := time.Now()
 	stats := app.GenStats{PromptTokens: len(tokens)}
+	var genStart time.Time // after the prompt is decoded
 	finish := func(reason string, err error) app.Token {
 		stats.StopReason = reason
 		stats.Duration = time.Since(start)
-		if secs := stats.Duration.Seconds(); secs > 0 {
+		// Decode speed only: prompt processing would dominate short replies.
+		if secs := time.Since(genStart).Seconds(); !genStart.IsZero() && secs > 0 && stats.GeneratedTokens > 0 {
 			stats.TokensPerSecond = float64(stats.GeneratedTokens) / secs
 		}
 		return app.Token{Done: true, Err: err, Stats: stats}
@@ -320,6 +322,7 @@ func (e *Engine) run(ctx context.Context, s *C.smol_ctx, tokens []C.int32_t, opt
 		return finish("error", err)
 	}
 
+	genStart = time.Now()
 	var pending []byte // bytes of an incomplete UTF-8 sequence
 	piece := make([]byte, 256)
 	for stats.GeneratedTokens < opts.MaxTokens {
@@ -396,9 +399,4 @@ func validPrefix(b *[]byte) string {
 	s := string(buf[:end])
 	*b = append(buf[:0], buf[end:]...)
 	return s
-}
-
-// smolPiece renders a token including special tokens (tests only).
-func smolPiece(e *Engine, tok C.int32_t, buf []byte) C.int {
-	return C.llama_token_to_piece(e.s.vocab, tok, (*C.char)(unsafe.Pointer(&buf[0])), C.int32_t(len(buf)), 0, true)
 }

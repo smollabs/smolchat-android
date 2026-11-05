@@ -38,6 +38,33 @@ static int smol_thermal_status(uintptr_t vmp, uintptr_t ctxp) {
 	if (attached) (*vm)->DetachCurrentThread(vm);
 	return result;
 }
+// Reports whether the system is in night (dark) mode: uiMode & 0x30 == 0x20.
+static int smol_night_mode(uintptr_t vmp, uintptr_t ctxp) {
+	JavaVM *vm = (JavaVM *)vmp;
+	jobject ctx = (jobject)ctxp;
+	JNIEnv *env;
+	int attached = 0;
+	if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+		if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return -1;
+		attached = 1;
+	}
+	int result = -1;
+	jclass cctx = (*env)->GetObjectClass(env, ctx);
+	jobject res = (*env)->CallObjectMethod(env, ctx,
+		(*env)->GetMethodID(env, cctx, "getResources", "()Landroid/content/res/Resources;"));
+	if (res && !(*env)->ExceptionCheck(env)) {
+		jobject cfg = (*env)->CallObjectMethod(env, res,
+			(*env)->GetMethodID(env, (*env)->GetObjectClass(env, res), "getConfiguration", "()Landroid/content/res/Configuration;"));
+		if (cfg && !(*env)->ExceptionCheck(env)) {
+			jint mode = (*env)->GetIntField(env, cfg,
+				(*env)->GetFieldID(env, (*env)->GetObjectClass(env, cfg), "uiMode", "I"));
+			result = (mode & 0x30) == 0x20;
+		}
+	}
+	if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); result = -1; }
+	if (attached) (*vm)->DetachCurrentThread(vm);
+	return result;
+}
 */
 import "C"
 
@@ -51,4 +78,11 @@ func thermalStatus() ThermalStatus {
 	runtime.LockOSThread() // JNI attach/detach must stay on one thread
 	defer runtime.UnlockOSThread()
 	return ThermalStatus(C.smol_thermal_status(C.uintptr_t(gioapp.JavaVM()), C.uintptr_t(gioapp.AppContext())))
+}
+
+// systemDark reports the Android night-mode setting (dark when unknown).
+func systemDark() bool {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return C.smol_night_mode(C.uintptr_t(gioapp.JavaVM()), C.uintptr_t(gioapp.AppContext())) != 0
 }
