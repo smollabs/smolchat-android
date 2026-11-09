@@ -136,3 +136,10 @@ Remove anything personal from logs and chat content before you post them.
 
 Please don't report security problems in public issues. Contact the SmolWorks
 maintainers privately so the issue can be fixed before it is disclosed.
+
+## License
+
+SmolChat is released under the [MIT License](LICENSE). By submitting a pull
+request, you agree that your contribution is licensed under the same terms.
+Code copied from elsewhere must come under a compatible license; keep its
+copyright notice and mention its source in the pull request.

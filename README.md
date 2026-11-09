@@ -164,8 +164,8 @@ or to verify their metadata. It has no analytics and no cloud inference.
 
 ## Licenses
 
-SmolChat's code belongs to SmolWorks. Models are distributed by their publishers
-under their own licenses (Apache-2.0 for SmolLM/SmolVLM, CDLA-Permissive-2.0
-for SmolDocling, MIT for ColSmol). llama.cpp is MIT-licensed. Inter and
+SmolChat's code is MIT-licensed (see [LICENSE](LICENSE)). Models are
+distributed by their publishers under their own licenses (Apache-2.0 for
+SmolLM/SmolVLM, CDLA-Permissive-2.0 for SmolDocling, MIT for ColSmol). llama.cpp is MIT-licensed. Inter and
 JetBrains Mono and Noto Emoji are under the SIL Open Font License
 (`assets/fonts/OFL-*.txt`). Brand artwork masters live in `assets/brand/`.
