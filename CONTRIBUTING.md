@@ -121,7 +121,11 @@ Go dependencies (Gio, `go-sqlite3`, …) are listed in `go.mod` and are
 downloaded automatically by `go build` / `go run`. llama.cpp is a git submodule
 in `native/llama.cpp`.
 
-> Windows isn't supported for development yet. Use WSL2 with a Linux setup.
+> **On Windows:** to run the full app, use WSL2 with a Linux setup
+> (`native/build.sh` is a Bash script). The core package and its tests build
+> natively, which is enough for issues in `app/` and `tests/`: install Go and a
+> 64-bit `gcc` (for example [MSYS2](https://www.msys2.org/) MinGW-w64, needed by
+> `go-sqlite3`), then run `go test ./tests`.
 
 ## Setting up the project
 

@@ -129,6 +129,10 @@ to start chatting.
 > `native/build.sh host` must run before `go run .` or `go test ./...`. Without
 > it the build fails with linker errors about missing `llama`/`ggml` libraries.
 
+> **Windows:** run the app under WSL2. For work in `app/` only, the core tests
+> also run natively with Go and a MinGW-w64 `gcc`: `go test ./tests`. See
+> [CONTRIBUTING](CONTRIBUTING.md#requirements).
+
 ### 3. Build the Android app
 
 Additional requirements: Android SDK (platform 35, build-tools), Android NDK
