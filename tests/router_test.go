@@ -36,6 +36,30 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestClassifyCodeDetectionIsCaseSensitiveAndContextual(t *testing.T) {
+	cases := map[string]app.Complexity{
+		// Plain English that the case-insensitive keyword list used to score
+		// as code, and a sentence that merely ends in a semicolon (#4).
+		"let me know a good name for a cat": app.Simple,
+		"what is the return policy":         app.Simple,
+		"what time is it;":                  app.Simple,
+		// "import" and "return" here are English words, not statements.
+		"import tariffs on steel and return the book tomorrow": app.Simple,
+		// Real code still carries the code signal.
+		"```python\nprint(1)\n```": app.Moderate,
+		"func main() {":            app.Moderate,
+		"def foo(x):":              app.Moderate,
+		"SELECT * FROM users":      app.Moderate,
+		"select * from users":      app.Moderate, // SQL keywords are case-insensitive
+		"#include <stdio.h>":       app.Moderate,
+	}
+	for q, want := range cases {
+		if got := app.Classify(q, 0); got != want {
+			t.Errorf("Classify(%q) = %v, want %v", q, got, want)
+		}
+	}
+}
+
 func TestSelectModelByComplexity(t *testing.T) {
 	small, mid, big := spec(t, "smollm2-135m-instruct-q8"), spec(t, "smollm2-360m-instruct-q8"), spec(t, "smollm2-1.7b-instruct-q4km")
 	in := app.RouteInput{Installed: []app.ModelSpec{small, mid, big}, Device: app.DeviceInfo{TotalRAM: 8 * gb, AvailRAM: 4 * gb}, ContextSize: 2048}
