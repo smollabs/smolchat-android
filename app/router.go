@@ -56,7 +56,21 @@ type Route struct {
 var ErrNoModel = errors.New("no model installed")
 
 var (
-	reCode     = regexp.MustCompile("(?i)```|\\b(func|def|class|import|return|const|var|let|SELECT|#include)\\b|[{};]\\s*$|=>")
+	// Code detection is case-sensitive and wants code-like context. Matching
+	// the bare words "let", "return" or "class" case-insensitively, or any
+	// trailing ";", scored ordinary sentences as code (#4).
+	reCode = regexp.MustCompile("```" +
+		`|\bfunc\s+\w+\s*\(` + // func main()
+		`|\bdef\s+\w+\s*\(` + // def f(x):
+		`|(?m:^\s*import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+)*\s*$)` + // import os
+		`|(?m:^\s*from\s+\S+\s+import\s+[\w*,\s]+$)` + // from os import path
+		`|\breturn\s+[^\n;]{0,80};` + // return x;
+		`|\b(?:const|var|let)\s+\w+\s*(?::|=)` + // let x = 1
+		`|(?i:\bSELECT\b[^\n]{0,200}?\bFROM\b)` + // SELECT ... FROM, any case
+		`|#include\s*[<"]` + // #include <stdio.h>
+		`|(?m:[{}]\s*$)` + // a block or an object on its own line
+		`|(?m:[)'"\]]\s*;\s*$)` + // a statement ending in );
+		`|=>`)
 	reMath     = regexp.MustCompile(`\d+\s*[-+*/^=]\s*\d+|\b(integral|derivative|equation|prove|theorem|probability|matrix)\b`)
 	complexKws = []string{
 		"explain", "why", "how does", "how do", "analy", "compare", "difference between", "step by step", "step-by-step",
