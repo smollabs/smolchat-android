@@ -355,3 +355,32 @@ func TestCatalogMatchesHub(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifyRemoteRetriesServerError ensures temporary Hub failures are retried.
+func TestVerifyRemoteRetriesServerError(t *testing.T) {
+        data := []byte("test model weights")
+        spec := testSpec(data)
+
+        var requests atomic.Int32
+        server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                if requests.Add(1) == 1 {
+                        http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+                        return
+                }
+
+                fmt.Fprintf(w, `[{"path":"w.gguf","size":%d,"lfs":{"oid":"%s"}}]`,
+                        len(data), spec.Files[0].SHA256)
+        }))
+        defer server.Close()
+
+        d, _, _, _ := setup(t, &fakeHub{})
+        d.TreeURL = func(app.ModelSpec) string { return server.URL }
+
+        if err := d.VerifyRemote(context.Background(), spec); err != nil {
+                t.Fatalf("VerifyRemote failed after temporary 503: %v", err)
+        }
+
+        if got := requests.Load(); got != 2 {
+                t.Fatalf("got %d requests, want 2", got)
+        }
+}
