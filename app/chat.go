@@ -22,10 +22,14 @@ type ChatView struct {
 
 // chatState is the mutable conversation state guarded by App.mu.
 type chatState struct {
-	view   ChatView
-	cancel context.CancelFunc
-	// lastSaved tracks the streaming checkpoint.
-	lastSaved time.Time
+    view       ChatView
+    generation *chatGeneration
+}
+
+type chatGeneration struct {
+    cancel    context.CancelFunc
+    reply     Message
+    lastSaved time.Time
 }
 
 func titleFrom(text string) string {
@@ -153,14 +157,16 @@ func (a *App) Regenerate() {
 
 // StopGeneration interrupts the reply in progress.
 func (a *App) StopGeneration() {
-	a.mu.Lock()
-	c := a.chat.cancel
-	a.mu.Unlock()
-	if c != nil {
-		c()
-	}
-	a.Runtime.Cancel()
+    a.mu.Lock()
+    gen := a.chat.generation
+    a.mu.Unlock()
+
+    if gen != nil && gen.cancel != nil {
+        gen.cancel()
+    }
+    a.Runtime.Cancel()
 }
+
 
 // history converts the conversation into engine messages.
 func history(system string, msgs []Message) []ChatMessage {
@@ -215,98 +221,128 @@ func (a *App) pickModel(conv Conversation, query string, turns int) (ModelSpec, 
 }
 
 func (a *App) generate() {
-	settings := a.Settings.Get()
-	a.mu.Lock()
-	conv := a.chat.view.Conv
-	prior := append([]Message(nil), a.chat.view.Messages...)
-	ctx, cancel := context.WithCancel(context.Background())
-	a.chat.cancel = cancel
-	a.chat.view.Streaming = true
-	a.chat.view.RouteNote = ""
-	a.chat.view.StreamStart, a.chat.view.StreamTokens = time.Time{}, 0
-	a.mu.Unlock()
-	a.invalidate()
+    settings := a.Settings.Get()
+    a.mu.Lock()
+    conv := a.chat.view.Conv
+    prior := append([]Message(nil), a.chat.view.Messages...)
+    ctx, cancel := context.WithCancel(context.Background())
 
-	go func() {
-		defer cancel()
-		query := ""
-		if n := len(prior); n > 0 {
-			query = prior[n-1].Content
-		}
-		reply := Message{ConversationID: conv.ID, Role: "assistant"}
-		spec, reason, err := a.pickModel(conv, query, len(prior)/2)
-		if err == nil {
-			reply.ModelID, reply.RouteReason = spec.ID, reason
-		}
-		if err := a.Store.AddMessage(&reply); err != nil {
-			a.report(err)
-		}
-		a.mu.Lock()
-		a.chat.view.Messages = append(a.chat.view.Messages, reply)
-		a.chat.view.RouteNote = reason
-		a.chat.lastSaved = time.Now()
-		a.mu.Unlock()
-		a.invalidate()
+    gen := &chatGeneration{
+        cancel:    cancel,
+        lastSaved: time.Now(),
+    }
+    a.chat.generation = gen
+    a.chat.view.Streaming = true
+    a.chat.view.RouteNote = ""
+    a.chat.view.StreamStart, a.chat.view.StreamTokens = time.Time{}, 0
+    a.mu.Unlock()
+    a.invalidate()
 
-		if err == nil {
-			if conv.SelectionMode != SelectManual {
-				a.report(a.Store.SetConversationModel(conv.ID, SelectAuto, spec.ID))
-			}
-			err = a.runGeneration(ctx, spec, settings, prior, reply.ID)
-		}
-		a.finishReply(reply.ID, err)
-	}()
+    go func() {
+        defer cancel()
+
+        query := ""
+        if n := len(prior); n > 0 {
+            query = prior[n-1].Content
+        }
+
+        reply := Message{ConversationID: conv.ID, Role: "assistant"}
+        spec, reason, err := a.pickModel(conv, query, len(prior)/2)
+        if err == nil {
+            reply.ModelID, reply.RouteReason = spec.ID, reason
+        }
+        if addErr := a.Store.AddMessage(&reply); addErr != nil {
+            a.report(addErr)
+        }
+
+        a.mu.Lock()
+        gen.reply = reply
+        if a.chat.generation == gen {
+            a.chat.view.Messages = append(a.chat.view.Messages, reply)
+            a.chat.view.RouteNote = reason
+        }
+        a.mu.Unlock()
+        a.invalidate()
+
+        if err == nil {
+            if conv.SelectionMode != SelectManual {
+                a.report(a.Store.SetConversationModel(conv.ID, SelectAuto, spec.ID))
+            }
+            err = a.runGeneration(ctx, spec, settings, prior, gen)
+        }
+        a.finishReply(gen, err)
+    }()
 }
 
-func (a *App) runGeneration(ctx context.Context, spec ModelSpec, s Settings, prior []Message, replyID int64) error {
-	system := s.SystemPrompt
-	if spec.Family == "SmolLM3" && !s.Thinking {
-		system = strings.TrimSpace(system + "\n/no_think") // fast answers unless thinking is on
-	}
-	cfg := ModelConfig{ID: spec.ID, Path: a.Models.WeightsPath(spec), ContextSize: s.ContextSize, Threads: s.Threads}
-	opts := GenerationOptions{
-		MaxTokens: s.MaxTokens, Temperature: s.Temperature,
-		TopK: 40, TopP: 0.95, MinP: 0.05, RepeatPenalty: 1.1, Seed: uint32(time.Now().UnixNano()),
-	}
-	var genErr error
-	// The callback runs on this generation goroutine, never the UI loop.
-	err := a.Runtime.Generate(ctx, cfg, history(system, prior), opts, func(t Token) {
-		a.mu.Lock()
-		m := a.findMsg(replyID)
-		if m == nil {
-			a.mu.Unlock()
-			return
-		}
-		if t.Done {
-			genErr = t.Err
-			m.Tokens = t.Stats.GeneratedTokens
-			m.TokensPerSec = t.Stats.TokensPerSecond
-			m.DurationMS = t.Stats.Duration.Milliseconds()
-			m.StopReason = t.Stats.StopReason
-			a.mu.Unlock()
-			return
-		}
-		m.Content += t.Text
-		if a.chat.view.StreamTokens == 0 {
-			a.chat.view.StreamStart = time.Now()
-		}
-		a.chat.view.StreamTokens++
-		var checkpoint *Message
-		if time.Since(a.chat.lastSaved) > 2*time.Second { // crash/kill safety
-			a.chat.lastSaved = time.Now()
-			snapshot := *m
-			checkpoint = &snapshot
-		}
-		a.mu.Unlock()
-		if checkpoint != nil {
-			a.report(a.Store.UpdateMessage(*checkpoint))
-		}
-		a.invalidate()
-	})
-	if err != nil {
-		return err
-	}
-	return genErr
+func (a *App) runGeneration(ctx context.Context, spec ModelSpec, s Settings, prior []Message, gen *chatGeneration) error {
+    system := s.SystemPrompt
+    if spec.Family == "SmolLM3" && !s.Thinking {
+        system = strings.TrimSpace(system + "\n/no_think")
+    }
+
+    cfg := ModelConfig{
+        ID: spec.ID, Path: a.Models.WeightsPath(spec),
+        ContextSize: s.ContextSize, Threads: s.Threads,
+    }
+    opts := GenerationOptions{
+        MaxTokens: s.MaxTokens, Temperature: s.Temperature,
+        TopK: 40, TopP: 0.95, MinP: 0.05,
+        RepeatPenalty: 1.1, Seed: uint32(time.Now().UnixNano()),
+    }
+
+    var genErr error
+    err := a.Runtime.Generate(ctx, cfg, history(system, prior), opts, func(t Token) {
+        a.mu.Lock()
+
+        if t.Done {
+            genErr = t.Err
+            gen.reply.Tokens = t.Stats.GeneratedTokens
+            gen.reply.TokensPerSec = t.Stats.TokensPerSecond
+            gen.reply.DurationMS = t.Stats.Duration.Milliseconds()
+            gen.reply.StopReason = t.Stats.StopReason
+
+            if a.chat.generation == gen {
+                if m := a.findMsg(gen.reply.ID); m != nil {
+                    *m = gen.reply
+                }
+            }
+            a.mu.Unlock()
+            return
+        }
+
+        gen.reply.Content += t.Text
+        var checkpoint *Message
+
+        if a.chat.generation == gen {
+            m := a.findMsg(gen.reply.ID)
+            if m != nil {
+                *m = gen.reply
+            }
+
+            if a.chat.view.StreamTokens == 0 {
+                a.chat.view.StreamStart = time.Now()
+            }
+            a.chat.view.StreamTokens++
+        }
+
+        if time.Since(gen.lastSaved) > 2*time.Second {
+            gen.lastSaved = time.Now()
+            snapshot := gen.reply
+            checkpoint = &snapshot
+        }
+
+        a.mu.Unlock()
+
+        if checkpoint != nil {
+            a.report(a.Store.UpdateMessage(*checkpoint))
+        }
+        a.invalidate()
+    })
+
+    if err != nil {
+        return err
+    }
+    return genErr
 }
 
 func (a *App) findMsg(id int64) *Message {
@@ -318,32 +354,39 @@ func (a *App) findMsg(id int64) *Message {
 	return nil
 }
 
-func (a *App) finishReply(id int64, err error) {
-	a.mu.Lock()
-	m := a.findMsg(id)
-	var final Message
-	if m != nil {
-		switch {
-		case errors.Is(err, context.Canceled):
-			m.StopReason = "cancelled"
-		case errors.Is(err, ErrNoModel):
-			m.StopReason, m.Content = "error", "No model is downloaded yet. Open the Model Library to download one — it only takes a minute, and then SmolChat works offline."
-		case err != nil:
-			m.StopReason, m.Content = "error", friendlyError(err)
-		}
-		if m.StopReason == "" {
-			m.StopReason = "eos"
-		}
-		final = *m
-	}
-	a.chat.view.Streaming = false
-	a.chat.cancel = nil
-	a.mu.Unlock()
-	if m != nil {
-		a.report(a.Store.UpdateMessage(final))
-	}
-	a.refreshConversations()
-	a.invalidate()
+func (a *App) finishReply(gen *chatGeneration, err error) {
+    a.mu.Lock()
+
+    switch {
+    case errors.Is(err, context.Canceled):
+        gen.reply.StopReason = "cancelled"
+    case errors.Is(err, ErrNoModel):
+        gen.reply.StopReason = "error"
+        gen.reply.Content = "No model is downloaded yet. Open the Model Library to download one — it only takes a minute, and then SmolChat works offline."
+    case err != nil:
+        gen.reply.StopReason = "error"
+        gen.reply.Content = friendlyError(err)
+    }
+
+    if gen.reply.StopReason == "" {
+        gen.reply.StopReason = "eos"
+    }
+
+    final := gen.reply
+
+    if a.chat.generation == gen {
+        if m := a.findMsg(gen.reply.ID); m != nil {
+            *m = gen.reply
+        }
+        a.chat.view.Streaming = false
+        a.chat.generation = nil
+    }
+
+    a.mu.Unlock()
+
+    a.report(a.Store.UpdateMessage(final))
+    a.refreshConversations()
+    a.invalidate()
 }
 
 func friendlyError(err error) string {
