@@ -34,12 +34,13 @@ type App struct {
 
 	invalidate func()
 
-	mu       sync.Mutex
-	device   DeviceInfo
-	convs    []Conversation
-	search   string
-	chat     chatState
-	notices  []Notice
+	mu            sync.Mutex
+    device        DeviceInfo
+    convs         []Conversation
+    search        string
+    searchVersion uint64
+    chat          chatState
+    notices       []Notice
 	noticeID int
 	online   int // -1 unknown, 0 offline, 1 online
 
@@ -199,34 +200,64 @@ func (a *App) OnForeground() {
 	a.Models.Scan()
 	a.RefreshDevice()
 }
-
 // Conversations returns the (filtered) sidebar list.
 func (a *App) Conversations() ([]Conversation, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]Conversation(nil), a.convs...), a.search
 }
-
 // SetSearch filters the conversation list.
 func (a *App) SetSearch(q string) {
 	a.mu.Lock()
 	a.search = q
+	a.searchVersion++
+	version := a.searchVersion
 	a.mu.Unlock()
-	a.refreshConversations()
+
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+
+		a.mu.Lock()
+		if version != a.searchVersion {
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+
+		a.loadConversations(q, version)
+	}()
 }
 
 func (a *App) refreshConversations() {
 	a.mu.Lock()
 	q := a.search
+	a.searchVersion++
+	version := a.searchVersion
 	a.mu.Unlock()
+
+	go a.loadConversations(q, version)
+}
+
+func (a *App) loadConversations(q string, version uint64) {
 	cs, err := a.Store.SearchConversations(q)
 	if err != nil {
-		a.report(err)
+		a.mu.Lock()
+		current := version == a.searchVersion
+		a.mu.Unlock()
+		if current {
+			a.report(err)
+		}
 		return
 	}
+
 	a.mu.Lock()
+	if version != a.searchVersion {
+		a.mu.Unlock()
+		return
+	}
 	a.convs = cs
 	a.mu.Unlock()
+
 	a.invalidate()
 }
 
