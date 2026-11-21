@@ -135,3 +135,49 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("reopen: %v %+v", err, msgs)
 	}
 }
+func TestUnicodeCaseInsensitiveSearch(t *testing.T) {
+	s := openStore(t)
+
+	titleConv, err := s.CreateConversation("Über Straße", app.SelectAuto, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messageConv, err := s.CreateConversation("Russian conversation", app.SelectAuto, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := app.Message{
+		ConversationID: messageConv.ID,
+		Role:           "user",
+		Content:        "Привет мир",
+	}
+	if err := s.AddMessage(&msg); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		query string
+		want string
+	}{
+		{"lowercase German title", "über", titleConv.ID},
+		{"uppercase German title", "ÜBER", titleConv.ID},
+		{"lowercase Russian message", "привет", messageConv.ID},
+		{"uppercase Russian message", "ПРИВЕТ", messageConv.ID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.SearchConversations(tt.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ID != tt.want {
+				t.Fatalf("SearchConversations(%q) = %+v, want conversation %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}

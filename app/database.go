@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 // Conversation is a chat thread.
@@ -40,6 +40,15 @@ type Message struct {
 type Store struct {
 	db *sql.DB
 }
+const sqliteDriverName = "smolchat_sqlite3"
+
+func init() {
+	sql.Register(sqliteDriverName, &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			return conn.RegisterFunc("unicode_lower", strings.ToLower, true)
+		},
+	})
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS conversations (
@@ -70,7 +79,7 @@ PRAGMA user_version = 1;
 
 // OpenStore opens (and migrates) the database at path.
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite3", "file:"+path+"?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open(sqliteDriverName, "file:"+path+"?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, err
 	}
@@ -127,15 +136,16 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	return scanConversations(rows)
 }
 
-// SearchConversations matches titles and message text (case-insensitive).
+// SearchConversations matches titles and message text (Unicode case-insensitive).
 func (s *Store) SearchConversations(q string) ([]Conversation, error) {
-	q = strings.TrimSpace(q)
+	q = strings.ToLower(strings.TrimSpace(q))
 	if q == "" {
 		return s.ListConversations()
 	}
+
 	pat := "%" + escapeLike(q) + "%"
-	rows, err := s.db.Query(`SELECT `+convCols+` FROM conversations c WHERE title LIKE ? ESCAPE '\'
-		OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.content LIKE ? ESCAPE '\')
+	rows, err := s.db.Query(`SELECT `+convCols+` FROM conversations c WHERE unicode_lower(title) LIKE ? ESCAPE '\'
+		OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND unicode_lower(m.content) LIKE ? ESCAPE '\')
 		ORDER BY updated_at DESC`, pat, pat)
 	if err != nil {
 		return nil, err
