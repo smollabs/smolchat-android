@@ -34,14 +34,15 @@ type App struct {
 
 	invalidate func()
 
-	mu       sync.Mutex
-	device   DeviceInfo
-	convs    []Conversation
-	search   string
-	chat     chatState
-	notices  []Notice
-	noticeID int
-	online   int // -1 unknown, 0 offline, 1 online
+	mu            sync.Mutex
+	device        DeviceInfo
+	convs         []Conversation
+	search        string
+	searchVersion uint64
+	chat          chatState
+	notices       []Notice
+	noticeID      int
+	online        int // -1 unknown, 0 offline, 1 online
 
 	themeChecked time.Time
 }
@@ -211,22 +212,54 @@ func (a *App) Conversations() ([]Conversation, string) {
 func (a *App) SetSearch(q string) {
 	a.mu.Lock()
 	a.search = q
+	a.searchVersion++
+	version := a.searchVersion
 	a.mu.Unlock()
-	a.refreshConversations()
+
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+
+		a.mu.Lock()
+		if version != a.searchVersion {
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+
+		a.loadConversations(q, version)
+	}()
 }
 
 func (a *App) refreshConversations() {
 	a.mu.Lock()
 	q := a.search
+	a.searchVersion++
+	version := a.searchVersion
 	a.mu.Unlock()
+
+	go a.loadConversations(q, version)
+}
+
+func (a *App) loadConversations(q string, version uint64) {
 	cs, err := a.Store.SearchConversations(q)
 	if err != nil {
-		a.report(err)
+		a.mu.Lock()
+		current := version == a.searchVersion
+		a.mu.Unlock()
+		if current {
+			a.report(err)
+		}
 		return
 	}
+
 	a.mu.Lock()
+	if version != a.searchVersion {
+		a.mu.Unlock()
+		return
+	}
 	a.convs = cs
 	a.mu.Unlock()
+
 	a.invalidate()
 }
 
