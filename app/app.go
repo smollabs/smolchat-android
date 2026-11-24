@@ -65,10 +65,17 @@ func New(o Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f, err := os.OpenFile(filepath.Join(paths.Logs, "smolchat.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-		log.SetOutput(f)
+	logPath := filepath.Join(paths.Logs, "smolchat.log")
+	logWriter, err := newRotatingLogWriter(logPath)
+	if err != nil {
+		log.SetOutput(os.Stderr)
+		log.Printf("initialize log writer: %v", err)
+	} else {
+		log.SetOutput(logWriter)
 	}
+
 	a := &App{Paths: paths, invalidate: o.Invalidate, online: -1}
+
 	if a.Settings, err = OpenSettings(paths.Settings); err != nil {
 		log.Printf("settings: %v", err)
 	}
